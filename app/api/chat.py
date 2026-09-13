@@ -8,8 +8,13 @@
     error    异常也走 SSE，前端不会只看到断连
 
 历史由服务端持有（内存 + SQLite），前端只发一句 text。
+
+**本文件现在是分派入口 + 旧的向量检索链路。** 按 `settings.chat_backend` 分：
+    "wiki"    走 app/api/wiki_chat.py（默认）
+    "legacy"  走本文件下半部分那套向量检索
+从 FIXED_SECTIONS 到 _stream 全部是 **legacy 专用**，wiki 模式下一行都不执行。
+留着是为了随时能切回去对照；等 Wiki 跑稳了再整体挪进 app/legacy/。
 """
-import json
 import re
 from collections.abc import AsyncIterator
 
@@ -19,6 +24,13 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from app.api.auth import current_user
+# 事件构造与流式清洗放在 sse.py：wiki_chat.py 要用同一套，
+# 复制一份到那边的话，摘编号这种精细逻辑迟早会分叉
+from app.api.sse import StripMarks as _StripMarks
+from app.api.sse import chunk_text as _chunk_text
+from app.api.sse import scour as _scour
+from app.api.sse import sse as _sse
+from app.api.sse import stage as _stage
 from app.config import settings
 from app.core import prompt
 from app.core.embed import embed
@@ -117,62 +129,6 @@ class ChatRequest(BaseModel):
     text: str = Field(min_length=1, max_length=8000)
 
 
-def _sse(payload: dict) -> str:
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-
-def _chunk_text(chunk) -> str:
-    """推理模型的 content 可能是分段列表，统一压成字符串"""
-    content = chunk.content
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "".join(
-            part.get("text", "") if isinstance(part, dict) else str(part) for part in content
-        )
-    return ""
-
-
-class _StripMarks:
-    """流式摘掉 [1]、【2】 这类引用编号。
-
-    提示词里写了别写编号，但历史里只要躺着一轮旧回答带着它，模型就会跟着学——
-    软约束挡不住这个，只能在这一层硬摘。难点是流式 token 会被切碎，`[1]` 可能
-    分两次到（`[` + `1]`），所以在缓冲区里多留一小段，等看清楚了再决定吐不吐。
-    """
-
-    NUM = re.compile(r"[\[【]\s*\d{1,3}\s*[\]】]")
-    HALF = re.compile(r"^[\[【]\s*\d{0,3}$")     # 像编号的前半截，还看不准
-
-    def __init__(self) -> None:
-        self.buf = ""
-
-    def feed(self, piece: str) -> str:
-        self.buf += piece
-        out = ""
-        while self.buf:
-            if self.buf[0] in "[【":
-                if self.NUM.match(self.buf):
-                    self.buf = self.NUM.sub("", self.buf, count=1)
-                    continue
-                if len(self.buf) < 6 and self.HALF.match(self.buf):
-                    break                       # 还可能是编号，攥着等下一块
-            out += self.buf[0]
-            self.buf = self.buf[1:]
-        return out
-
-    def flush(self) -> str:
-        """流结束：残留的按原文吐出——真是编号的话，前面早就整个摘掉了"""
-        tail, self.buf = self.buf, ""
-        return tail
-
-
-def _scour(text: str) -> str:
-    """老会话里还躺着清洗器上线前留下的 [1]。读历史时一并摘掉——
-    只摘新生成的不够，模型每轮都看得见历史里那些，照样跟着抄。"""
-    return _StripMarks.NUM.sub("", text)
-
-
 # 意图 → 限定在哪几个文档里检索。None = 不限制（已证明分不开时不硬分）
 INTENT_DOCS: dict[str, list[str] | None] = {
     "resume": ["我的简历"],
@@ -223,11 +179,6 @@ async def _classify(text: str, history: list[dict]) -> str:
             return key
     print(f"[意图] 回了个看不懂的：{word[:40]!r} → 退回全库检索")
     return "both"
-
-
-def _stage(key: str, text: str) -> dict:
-    """阶段事件。前端拿它显示「识别意图…」这类进度，key 用于去重/排序"""
-    return {"type": "stage", "key": key, "text": text}
 
 
 async def _retrieve(text: str, history: list[dict]) -> AsyncIterator[dict]:
@@ -373,8 +324,19 @@ async def _stream(session: Session, text: str) -> AsyncIterator[str]:
 @router.post("/chat")
 async def chat(req: ChatRequest, user: dict = Depends(current_user)) -> StreamingResponse:
     session = await manager.get_session(user["id"], user["username"])
+    text = req.text.strip()
+
+    if settings.chat_backend == "wiki":
+        # 函数内 import：wiki_chat 反过来要用本模块导出的 sse 助手，
+        # 放在模块顶层就成了循环导入。反正每个进程只会走这里一次。
+        from app.api.wiki_chat import stream as wiki_stream
+
+        body = wiki_stream(session, text)
+    else:
+        body = _stream(session, text)
+
     return StreamingResponse(
-        _stream(session, req.text.strip()),
+        body,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
