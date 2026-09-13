@@ -8,7 +8,7 @@
     路径一旦写歪，source_sha/compiler_fp 就落到别的页面上，增量跳过永久失效。
 规则二：skip 的页面不能进生成环节（提示词写着「skip 就一个字都不写」）。
 """
-from app.wiki import compiler
+from app.wiki import compiler, store
 from app.wiki.compiler import CompileError, Item
 
 
@@ -138,6 +138,74 @@ def test_围栏总比最长反引号串长一根():
 
 def test_单根反引号不影响围栏():
     assert compiler._fence_for("`code`") == "```"
+
+
+# ─── 正文兜底取摘要 ──────────────────────────────────
+def test_缺_summary_时从正文取第一句():
+    # schema 要求 summary 非空，缺了就让**整次** ingest 校验失败、一个字都不写。
+    # 计划外页面（_ad_hoc）的 item.summary 是空的，模型又常不写 summary。
+    assert compiler._first_line("# 标题\n\n正文第一句。\n\n第二句") == "标题"
+
+
+def test_取摘要会跳过空行和列表符号():
+    assert compiler._first_line("\n\n> 引用的话\n后面") == "引用的话"
+    assert compiler._first_line("- 列表项") == "列表项"
+
+
+def test_取摘要给的长度有上限():
+    assert len(compiler._first_line("字" * 500)) == 80
+
+
+def test_正文为空时取摘要返回空串():
+    assert compiler._first_line("") == ""
+    assert compiler._first_line("   \n\n  ") == ""
+
+
+# ─── _finalize 的字段合并 ────────────────────────────
+def _fin(rel, meta, body, item, old):
+    return compiler._finalize(rel, meta, body, item, "来源.md",
+                              "2026-01-01", "sha", "fp", old)
+
+
+def test_contradictions_字段缺失时粘住旧值():
+    # 模型整页重写时照模板写、不带这个字段是常态。原来一律落成 none，
+    # 一条未处理的矛盾就这样被无声埋掉，没有任何提示。
+    old = store.Page("concepts/甲.md", {"contradictions": "open"}, "旧")
+    got = _fin("concepts/甲.md",
+               {"title": "甲", "type": "concept", "summary": "s"}, "新正文",
+               Item("concept", "update", "甲", "s"), old)
+    assert got.meta["contradictions"] == "open"
+
+
+def test_contradictions_显式写就听模型的():
+    old = store.Page("concepts/甲.md", {"contradictions": "open"}, "旧")
+    got = _fin("concepts/甲.md",
+               {"title": "甲", "type": "concept", "summary": "s",
+                "contradictions": "resolved"}, "新正文",
+               Item("concept", "update", "甲", "s"), old)
+    assert got.meta["contradictions"] == "resolved"
+
+
+def test_没有旧页时_contradictions_默认_none():
+    got = _fin("concepts/甲.md",
+               {"title": "甲", "type": "concept", "summary": "s"}, "正文",
+               Item("concept", "create", "甲", "s"), None)
+    assert got.meta["contradictions"] == "none"
+
+
+def test_缺_summary_时_finalize_从正文兜底():
+    got = _fin("concepts/甲.md", {"title": "甲", "type": "concept"},
+               "正文第一句\n\n后面", Item("concept", "create", "甲", ""), None)
+    assert got.meta["summary"] == "正文第一句"
+
+
+def test_有旧页时_sources_累积而不是覆盖():
+    old = store.Page("concepts/甲.md", {"sources": ["A文档.md"], "created": "2020-01-01"}, "旧")
+    got = _fin("concepts/甲.md",
+               {"title": "甲", "type": "concept", "summary": "s"}, "正文",
+               Item("concept", "update", "甲", "s"), old)
+    assert got.meta["sources"] == ["A文档.md", "来源.md"]
+    assert got.meta["created"] == "2020-01-01"
 
 
 # ─── 计划外页面的兜底 ────────────────────────────────

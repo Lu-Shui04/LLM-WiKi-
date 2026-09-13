@@ -2,7 +2,7 @@
 title: RAG筛选与防幻觉
 type: concept
 summary: 政策类文档按 chunkSize 500、overlap 50 切分，Top-K 取 4 平衡召回与上下文干净度，禁止无依据编造
-tags: [RAG, 防幻觉, 客服系统]
+tags: [RAG, 切分策略, 防幻觉, Top-K]
 contradictions: none
 sources: [我的简历.md, 常见问题回答.md]
 created: 2026-09-13

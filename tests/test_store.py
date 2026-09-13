@@ -2,6 +2,9 @@
 
 全部用 tmp_path，不碰真实的 wiki/ 目录。
 """
+import os
+import stat
+
 import pytest
 
 from app.wiki import store
@@ -76,6 +79,48 @@ def test_索引按类型分组且顺序固定(tmp_path):
 def test_索引里的竖线被转义(tmp_path):
     pages = [_page("concepts/甲.md", "甲", "concept", summary="a|b")]
     assert "a\\|b" in store.render_index(pages)
+
+
+def test_仅大小写不同的重名被拒(tmp_path):
+    # NTFS 下是同一个文件，_tmp_path 也是同一个 .tmp —— 放行等于后写的盖掉先写的
+    writes = [
+        _page("concepts/rag.md", "甲", "concept"),
+        _page("concepts/RAG.md", "乙", "concept"),
+    ]
+    with pytest.raises(CommitError):
+        store.commit(writes, root=tmp_path)
+    assert list(tmp_path.rglob("*.md")) == []
+
+
+def test_read_all_跳过名叫_md_的目录(tmp_path):
+    # rglob 连目录一起匹配，read_text 会炸。这个入口每次 query/ingest 都会走，
+    # 混进一个名叫 foo.md 的目录就能让整个知识库打不开。
+    store.commit([_page("concepts/甲.md", "甲", "concept")], root=tmp_path)
+    (tmp_path / "concepts" / "foo.md").mkdir()
+    assert [p.rel for p in store.read_all(tmp_path)] == ["concepts/甲.md"]
+
+
+def test_两阶段失败时不留下半成品且报清楚(tmp_path):
+    # 第 2 个目标设为只读，os.replace 覆盖它会失败。第 1 个此刻**已经改名成功**了，
+    # 所以异常消息不能说「正式文件未被改动」——那会让调用方以为 wiki/ 还完好。
+    dst = tmp_path / "concepts" / "b.md"
+    dst.parent.mkdir(parents=True)
+    dst.write_text("旧的 b\n", encoding="utf-8")
+    os.chmod(dst, stat.S_IREAD)
+    try:
+        with pytest.raises(CommitError) as ei:
+            store.commit([
+                _page("concepts/a.md", "a", "concept"),
+                _page("concepts/b.md", "b", "concept"),
+            ], root=tmp_path)
+        msg = str(ei.value)
+        assert "写到一半" in msg, msg
+        assert "a.md" in msg, msg
+        assert (tmp_path / "concepts" / "a.md").is_file()
+        assert list(tmp_path.rglob("*.tmp")) == []      # 清理干净
+        assert not (tmp_path / "index.md").is_file()     # 索引没更新，消息里说了
+    finally:
+        os.chmod(dst, stat.S_IWRITE)
 
 
 def test_日志首次写带表头(tmp_path):

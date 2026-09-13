@@ -107,6 +107,22 @@ def test_保留设备名被拒():
         check_rel("concepts/COM1.md")
 
 
+def test_保留设备名的各种变体也要被拒():
+    # Windows 是拿**第一个点之前**那一段（并 trim 尾随空格）去比对设备名的。
+    # 用 Path(name).stem 取的是最后一个后缀，这些全会漏网——
+    # 而它们写盘时同样是「返回成功、磁盘上没有文件」。
+    for bad in ("concepts/nul .md", "concepts/nul.md.md", "concepts/nul. .md",
+                "concepts/CON.md.md", "concepts/COM1 .md", "concepts/aux..md"):
+        with pytest.raises(ProtocolError):
+            check_rel(bad)
+
+
+def test_设备名只是前缀的合法文件不受影响():
+    # 只有整段**等于**设备名才行。nul笔记 和 nul 是两个不同的名字。
+    assert check_rel("concepts/nul笔记.md") == "concepts/nul笔记.md"
+    assert check_rel("concepts/console.md") == "concepts/console.md"
+
+
 def test_以点结尾被拒():
     # Windows 会静默吃掉文件名结尾的点和空格，写出来的文件名和 rel 对不上，
     # 于是 by_rel 查不到它、页面掉进「计划外页面」分支。

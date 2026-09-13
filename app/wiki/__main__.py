@@ -80,7 +80,9 @@ def main(argv=None) -> int:
     # 三类失败都要接住，甩 traceback 对使用者没有任何价值：
     # CompileError 是编译流程本身的问题（截断、没有 pages）；
     # ProtocolError 是模型输出的路径不合法（这条是故意硬失败的，见 protocol.py）；
-    # CommitError 是落盘前校验没过。三者都是「一个字都没写」。
+    # CommitError 是落盘没成功——注意它**不保证**「一个字都没写」：
+    # 落盘分「写 .tmp」和「改名为正式文件」两步，改名中途失败会留下半成品。
+    # 所以这里不替它断言，具体情况由异常消息自己说。
     from app.config import ConfigError
     from app.wiki import compiler, protocol, store
 
@@ -111,7 +113,10 @@ def main(argv=None) -> int:
         print("（照 .env.example 复制一份 .env 填上 key 即可）", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        print("\n已中断。本次没有写盘。", file=sys.stderr)
+        # 不写「本次没有写盘」：落盘是「写 .tmp → 改名为正式文件」两步，
+        # 在中途打断就可能已经改了一部分名。真要确认状态，看 wiki/。
+        print("\n已中断。如果是在写盘阶段打断的，wiki/ 可能是不完整的，"
+              "重跑一次 ingest 即可。", file=sys.stderr)
         return 130
 
     _report_ingest(res)

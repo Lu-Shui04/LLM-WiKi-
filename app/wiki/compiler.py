@@ -66,6 +66,30 @@ def source_sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
 
 
+def _needs_rebuild(force: bool, pages_now: list, fp: str) -> bool:
+    """要不要把全部页面整页重编。
+
+    看的是 wiki/summaries/ 下**所有**摘要页的 fp，不只是本次这一份——fp 是全局的。
+    只看本次的话：ingest A、ingest B、改 SCHEMA、再 ingest C——C 的摘要页是全新的
+    （没有旧 fp 可比）→ 判「不用重编」→ A 和 B 带着旧规则的产物永远留在那儿。
+
+    只收「源文档还在 knowledge/ 里」的摘要页：源文档被删之后那一页不会再有
+    任何一次 ingest 去刷新它，让它参与投票等于让 rebuild 永远为真（每次 ingest
+    都全量重编，白花钱）。代价是带旧 fp 的摘要页如果**全都是**孤儿，rebuild 就
+    恒为假，规则变更在那些页上会静默失效。这是刻意选的保守方向。
+    这个判断 --dry 和真实 ingest 共用，免得「会不会多花钱」的估算和实际行为对不上。
+    """
+    if force:
+        return True
+    stored = {
+        str(p.meta.get("compiler_fp", ""))
+        for p in pages_now
+        if p.meta.get("type") == "summary"
+        and (settings.knowledge_dir / Path(p.rel).name).is_file()
+    }
+    return any(f != fp for f in stored)
+
+
 # ─── 模型调用 ────────────────────────────────────────
 @dataclass
 class Reply:
@@ -376,7 +400,7 @@ async def ingest(
     # paths.SKIP_SOURCES 的注释写着「和 app/core/ingest.py 的 SKIP 保持一致，
     # 否则同一份 README 会在旧库进切块、在新库进编译，两边对不上」——
     # 但这个集合此前只在 source_files()（批量入口）里生效，单文件 ingest 绕过了它。
-    if src.name in paths.SKIP_SOURCES:
+    if paths.is_skipped(src.name):
         raise CompileError(
             f"{src.name} 是说明文档、不算知识，跳过（与 app/core/ingest.py 的 SKIP 一致）"
         )
@@ -396,7 +420,7 @@ async def ingest(
                           reason="源文档与编译规则都没变", elapsed=time.time() - t0)
 
     if dry:
-        return _dry_report(name, raw, sha, fp, pages_now, old_summary, t0)
+        return _dry_report(name, raw, sha, fp, pages_now, old_summary, force, t0)
 
     today = date.today().isoformat()
     usage: dict = {}
@@ -422,20 +446,7 @@ async def ingest(
     # 让它在这种时候 skip 的话，摘要页的 compiler_fp 永远追不上当前值——
     # 于是每次 ingest 都判「规则变了」→ 重编 → 又被 skip，**永久空转**，
     # 页面还永远停在旧规则的产物上。这个判断只能由代码做。
-    #
-    # 而且要看**所有**摘要页，不能只看本次这一份：fp 是全局的。
-    # 只看本次的话，ingest A、ingest B、改 SCHEMA、再 ingest C——
-    # C 的摘要页是全新的（old_summary 为 None）→ 判「不用重编」→
-    # A 和 B 带着旧 fp 永远留在那儿，规则变了却只有 C 是新产物。
-    # 只收「源文档还在 knowledge/ 里」的摘要页：源文档被删之后那一页不会有
-    # 任何一次 ingest 去刷新它，让它参与投票等于让 rebuild 永远为真。
-    stored_fps = {
-        str(p.meta.get("compiler_fp", ""))
-        for p in pages_now
-        if p.meta.get("type") == "summary"
-        and (settings.knowledge_dir / Path(p.rel).name).is_file()
-    }
-    rebuild = force or any(f != fp for f in stored_fps)
+    rebuild = _needs_rebuild(force, pages_now, fp)
     # 源文档内容变了也必须重写摘要页——和 fp 那条是同一类失效：
     # 模型看不到旧原文，判不出「跟上次比变了什么」；内容只是小改时它照样会说
     # skip，于是 source_sha 永远停在旧值，之后每次 ingest 都白跑一遍四步编译。
@@ -447,8 +458,10 @@ async def ingest(
     for i in items:
         if i.op == "skip" and not store.exists(i.rel):
             # skip 的语义是「这页没有新东西，别动它」，前提是它已经在了。
-            # 页面根本不存在时静默 skip，会让它混进 untouched 装成「已存在的旧页」，
-            # 而知识库里其实是缺的——分析阶段规划过它，说明它本该有。
+            # 页面不存在时静默 skip，这一页就**哪个列表都不进**：untouched 的
+            # 条件是 i.rel in olds，它不在，于是报告里既不算新建也不算更新、
+            # 连「跳过」都不算——分析阶段规划过它（说明它本该有），产物里却
+            # 没有它，而且报告上看不出少了任何东西。
             warns.append(f"{i.rel}：op 是 skip 但页面不存在，改为 create")
             i.op = "create"
         if i.op == "create" and store.exists(i.rel):
@@ -480,7 +493,16 @@ async def ingest(
         _guard(r, "来源摘要页")
         _add_usage(usage, r.usage)
         reasoning_all.append(r.reasoning)
-        texts += protocol.parse_files(r.text)
+        # 这一步**只**产出摘要页，它的合法落点有且只有一个。
+        # 所以这里无条件改回 s_rel，而不是只纠正 summaries/ 里面写歪的名字：
+        # 模型把摘要页塞进 concepts/ 时，页面会掉进 _ad_hoc，而 _ad_hoc 造的 Item
+        # 不带 source_sha/compiler_fp——增量跳过从此永久失效，且失效得毫无痕迹
+        # （每次 ingest 都重编，没人会想到是页名的问题）。
+        # 同一份输出里写了多个文件时，第二个会在下面的查重里被丢掉并留告警。
+        for rel, text in protocol.parse_files(r.text):
+            if rel != s_rel:
+                warns.append(f"{rel}：摘要页只能写 {s_rel}，已改到该路径")
+            texts.append((s_rel, text))
     if page_items:
         print(f"[3/4] 生成实体与概念页（{len(page_items)} 页）…")
         r = await _ask("pages.md", _pages_input(raw, name, page_items, pages_now, known),
@@ -500,9 +522,30 @@ async def ingest(
     reasoning = "\n\n".join(x for x in reasoning_all if x)
     _dump_raw(texts, reasoning, plan)
 
+    # 不变式：摘要页是**唯一**承载 source_sha/compiler_fp 的页面，而它一定会被
+    # 规划进 summary_items（_items 强制补一个，且下面的规则总会把它的 op 抬成
+    # update）。上面那段又无条件把摘要步的产物改回 s_rel。所以走到这里 s_rel
+    # 必定在 texts 里——如果不在，说明有人动了「哪些页面要生成」的判定而没同步
+    # 这里，后果是 wiki 建起来了却永远追不上 fp（每次都重编，零报错）。
+    # 写盘之前硬失败，比留下一个静默坏掉的知识库好。
+    if summary_items and s_rel not in {rel for rel, _ in texts}:
+        raise CompileError(
+            f"这次编译没有产出摘要页 {s_rel}，它承载增量跳过所需的 source_sha/"
+            f"compiler_fp。原始输出已存到 wiki/.cache/last-raw/，可以去看模型"
+            f"到底写了什么。"
+        )
+
     # ─── 组装页面（代码补 frontmatter，模型只提供内容字段）───
     by_rel = {i.rel: i for i in items}
     olds = {p.rel: p for p in pages_now}
+    # rel → 计划里的规范写法。这个映射堵的是**「计划 vs 输出」**方向的大小写差异
+    # （「输出 vs 输出」由上面两处 casefold 查重堵）：计划里是 concepts/rag.md、
+    # 生成阶段模型写成 concepts/RAG.md 时，by_rel 和 olds 都按原样查不中——
+    # 页面掉进 _ad_hoc（op 被硬编码成 create），_finalize 也拿不到旧 meta，
+    # 于是 sources 的累积历史被重置、created 变成今天、contradictions 从 open
+    # 退回 none，报告里还算成「新建」。而 NTFS 下这两个名字本来就是同一个文件，
+    # 这种改名没有任何意义。
+    canon = {i.rel.casefold(): i.rel for i in items}
     writes: list[store.Page] = []
     seen: set[str] = set()
 
@@ -515,6 +558,7 @@ async def ingest(
         if rel != s_rel and paths.DIR_TYPE.get(rel.split("/")[0]) == "summary":
             warns.append(f"{rel}：摘要页只能写 {s_rel}，已改到该路径")
             rel = s_rel
+        rel = canon.get(rel.casefold(), rel)
         item = by_rel.get(rel)
         if item is None:
             # 生成阶段模型自己多写的页面。它读的是全文，判断可能比分析阶段更全，
@@ -559,6 +603,17 @@ async def ingest(
     return res
 
 
+def _first_line(body: str) -> str:
+    """取正文第一段说人话的文字，给缺 summary 的页面兜底。"""
+    for line in (body or "").splitlines():
+        # 这里的 lstrip 就是要按**字符集**剥（剥掉行首的 # > * + -），
+        # 不是想把 ">*+-" 当整串前缀去掉——B005 那种误用警告在这里不适用。
+        s = line.strip().lstrip("#").strip().lstrip(">*+-").strip()  # noqa: B005
+        if s:
+            return s[:80]
+    return ""
+
+
 def _finalize(rel, meta, body, item: Item, source_name: str, today: str,
               sha: str, fp: str, old: store.Page | None) -> store.Page:
     """把模型写的 frontmatter 和代码负责的字段合并。
@@ -569,8 +624,25 @@ def _finalize(rel, meta, body, item: Item, source_name: str, today: str,
     old_meta = old.meta if old else {}
     meta["title"] = str(meta.get("title", "")).strip() or item.title
     meta["type"] = item.type
-    meta["summary"] = str(meta.get("summary", "")).strip() or item.summary
-    meta["contradictions"] = str(meta.get("contradictions", "none")).strip() or "none"
+    # 计划外页面（_ad_hoc）的 item.summary 是空的，而模型也常常不写 summary——
+    # 但 schema 要求它非空，缺了就是 error → CommitError → **整次 ingest 一个字都不写**。
+    # 收下这类页面的初衷是「丢掉可惜」，结果变成「多写一页就全废」，比丢弃糟得多。
+    # 这里从正文现取一句兜底：落盘的是真话，不是占位符。实在取不到才退回标题。
+    meta["summary"] = (
+        str(meta.get("summary", "")).strip()
+        or item.summary.strip()
+        or _first_line(body)
+        or item.title
+    )
+    # contradictions 是「需要人看一眼」的标记，模型不写时必须**粘住**旧值。
+    # 整页重写时字段缺失是常态（它照模板写），而这里原来一律落成 none——
+    # 一条未处理的矛盾就这样被无声埋掉，没有任何提示。
+    # 注意：模型**显式**写 none 时仍然照它（那是一次重新判断，不是遗漏）；
+    # 显式写 resolved 才是清掉标记的正常途径。
+    old_ctr = str(old_meta.get("contradictions", "")).strip()
+    meta["contradictions"] = (
+        str(meta.get("contradictions", "")).strip() or old_ctr or "none"
+    )
     meta["sources"] = frontmatter.merge_sources(old_meta.get("sources"), [source_name])
     meta["created"] = str(old_meta.get("created") or today)
     meta["updated"] = today
@@ -619,7 +691,7 @@ def _log_section(res: Result, show_reasoning: bool) -> str:
     return "\n".join(lines)
 
 
-def _dry_report(name, raw, sha, fp, pages_now, old_summary, t0) -> Result:
+def _dry_report(name, raw, sha, fp, pages_now, old_summary, force, t0) -> Result:
     print(f"源文档      {name}（{len(raw):,} 字）")
     print(f"source_sha  {sha}")
     print(f"compiler_fp {fp}")
@@ -636,6 +708,12 @@ def _dry_report(name, raw, sha, fp, pages_now, old_summary, t0) -> Result:
             print("判定        会重编（源文档内容变了）")
     else:
         print("上次编译    无，这是首次")
+    # 这一行走的是和真实 ingest 完全相同的判断（_needs_rebuild），
+    # 否则「这次会不会多花钱」的估算和实际行为会对不上——
+    # 它看的是所有摘要页的 fp，不是只看上面这一份。
+    is_rebuild = _needs_rebuild(force, pages_now, fp)
+    print(f"整页重编    {'是' if is_rebuild else '否'}"
+          f"（看 wiki/summaries/ 下所有源文档仍在的摘要页的 fp）")
     print(f"预计输入    首次约 {len(raw) + 6000:,} 字（源文档 + SCHEMA + 现有页面大纲）")
     print("（--dry 不调用模型，不花钱）")
     return Result(source=name, reason="dry", elapsed=time.time() - t0)

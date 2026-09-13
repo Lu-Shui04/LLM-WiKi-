@@ -28,6 +28,14 @@ CACHE_DIR = ".cache"
 # 目录说明不算知识。和 app/core/ingest.py 的 SKIP 保持一致，
 # 否则同一份 README 会在旧库进切块、在新库进编译，两边对不上。
 SKIP_SOURCES = {"README.md"}
+_SKIP_LOWER = {s.casefold() for s in SKIP_SOURCES}
+
+
+def is_skipped(name: str) -> bool:
+    """大小写不敏感：NTFS 下 knowledge/readme.md 和 README.md 是同一个文件。
+    不这么比的话，写小写就照编译、写大写才跳过——同一份文件两种待遇。
+    """
+    return (name or "").casefold() in _SKIP_LOWER
 
 
 def wiki_dir() -> Path:
@@ -54,4 +62,4 @@ def summary_rel(source: str) -> str:
 def source_files() -> list[Path]:
     """knowledge/ 下全部 .md，按路径排序。**只读，永不写入。**"""
     root = settings.knowledge_dir
-    return [p for p in sorted(root.rglob("*.md")) if p.name not in SKIP_SOURCES]
+    return [p for p in sorted(root.rglob("*.md")) if not is_skipped(p.name)]

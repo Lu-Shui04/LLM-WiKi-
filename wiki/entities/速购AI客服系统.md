@@ -2,7 +2,7 @@
 title: 速购AI客服系统
 type: entity
 summary: 电商 AI 客服系统，LangGraph 多 Agent 分流订单、RAG 政策问答、多轮管理与转人工，并具备 SSE 可观测前端
-tags: [电商, 客服系统, LangGraph, AI]
+tags: [AI客服, LangGraph, 多Agent, RAG]
 contradictions: none
 sources: [我的简历.md, 常见问题回答.md]
 created: 2026-09-13

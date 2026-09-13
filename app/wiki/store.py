@@ -34,11 +34,18 @@ LOG_HEADER = """# 操作日志
 
 
 class CommitError(RuntimeError):
-    """校验没过，一个字都没写。"""
+    """落盘没成功。
+
+    校验没过 = 一个字都没写；但**改名**中途失败可能已经落了一部分——
+    异常消息里会如实说是哪种，别在外面统一宣称「磁盘零变化」。
+    """
 
     def __init__(self, errors: list[str]):
         self.errors = errors
-        super().__init__("落盘前校验失败：\n  - " + "\n  - ".join(errors))
+        # 不写「落盘前校验失败」这类 header：errors 里既有校验失败，也有**写盘**
+        # 失败，一个写死的 header 必然对其中一类说谎。每条消息自己已经说清了。
+        body = errors[0] if len(errors) == 1 else "\n".join(f"  - {e}" for e in errors)
+        super().__init__(body)
 
 
 @dataclass
@@ -65,6 +72,12 @@ def read_all(root: Path | None = None) -> list[Page]:
     for p in sorted(base.rglob("*.md")):
         rel = p.relative_to(base).as_posix()
         if rel in (paths.INDEX, paths.LOG) or rel.startswith("."):
+            continue
+        # rglob 连**目录**一起匹配（只要目录名以 .md 结尾），read_text 会炸。
+        # 这个小检查跑在每次 query 和每次 ingest 的入口上：wiki/ 里混进一个
+        # 名叫 foo.md 的目录就会让整个知识库打不开，而报错是没有任何提示的
+        # IsADirectoryError/PermissionError。跳过它。
+        if not p.is_file():
             continue
         meta, body = frontmatter.parse(p.read_text(encoding="utf-8"))
         out.append(Page(rel=rel, meta=meta, body=body))
@@ -99,7 +112,8 @@ def commit(
 ) -> tuple[list[Page], list[str]]:
     """阶段一全量校验 + 死链降级，阶段二统一落盘。
 
-    → (实际写入的页面, 警告)。errors 非空抛 CommitError，磁盘保持不变。
+    → (实际写入的页面, 警告)。校验没过时抛 CommitError 且磁盘保持不变；
+    **写盘阶段**失败则可能已落了一部分，异常消息里会说明。
     """
     base = root or paths.wiki_dir()
     existing = read_all(base)
@@ -107,6 +121,18 @@ def commit(
 
     warns: list[str] = []
     errors: list[str] = []
+    # 大小写不敏感的重名检查：NTFS 下 RAG.md 和 rag.md 是同一个文件，
+    # 而 _tmp_path 是 rel + ".tmp" —— 两个 .tmp 也会是同一个。
+    # compiler.ingest 里已经查过一遍，但 commit 是对外 API，得自己站得住。
+    seen_rel: set[str] = set()
+    for p in writes:
+        key = p.rel.casefold()
+        if key in seen_rel:
+            errors.append(
+                f"{p.rel}：本次要写的页面里有仅大小写不同的重名（Windows 下是同一个文件）"
+            )
+        seen_rel.add(key)
+
     for p in writes:
         errs, ws = schema.validate(p.rel, p.meta, p.body)
         errors += errs
@@ -125,20 +151,34 @@ def commit(
 
     # 阶段二：**先全部写进 .tmp，再统一起名**。
     # 直接 write_text 到正式路径的话，第 3 个文件失败时前 2 个已经落盘了——
-    # 那正是「半成品 wiki」。分两步之后，写这一步骤失败只会留下 .tmp，
+    # 那正是「半成品 wiki」。分两步之后，**写**这一步骤失败只会留下 .tmp，
     # 正式文件一个都没动。
-    # （改名本身也可能失败，那种情况没有备份是回滚不了的——诚实记在这里，
-    #   但改名的失败概率比写低得多。真出错时异常信息会说清是哪种。）
+    # 但**改名**这一步骤失败是回滚不了的（没有备份）：already 改过名的那几个
+    # 已经是新内容了。所以这里如实数出来报给调用方，而不是一律宣称
+    # 「正式文件未被改动」——那句话在改名中途失败时是假的，会让调用方以为
+    # wiki/ 还是完好的、不用重跑。
     staged: list[Page] = []
+    placed: list[Page] = []
     try:
         for p in writes:
             _stage(p, base)
             staged.append(p)
         for p in writes:
             _place(p, base)
+            placed.append(p)
     except OSError as exc:
         for p in staged:
-            _tmp_path(base, p.rel).unlink(missing_ok=True)
+            try:
+                _tmp_path(base, p.rel).unlink(missing_ok=True)
+            except OSError:
+                pass    # 清理失败绝不能再抛：那会把真正的错误盖掉，
+                        # 调用方看到的是 PermissionError 而不是「哪一步失败了」
+        if placed:
+            raise CommitError([
+                f"写盘写到一半失败：{len(placed)}/{len(writes)} 个页面已经改名落盘"
+                f"（{'、'.join(p.rel for p in placed)}），index.md 和 log.md 都还没更新，"
+                f"wiki/ 现在是不完整的。重跑一次 ingest 即可覆盖修复。原因：{exc}"
+            ]) from exc
         raise CommitError([f"写盘失败（正式文件未被改动）：{exc}"]) from exc
 
     write_index(read_all(base), base)

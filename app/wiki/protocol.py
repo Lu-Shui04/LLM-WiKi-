@@ -101,13 +101,18 @@ def check_rel(raw: str) -> str:
         raise ProtocolError(
             f"文件名里有 Windows 不允许的字符（写盘时会静默失败或变成数据流）：{raw}"
         )
-    stem = Path(name).stem
-    if stem.upper() in _RESERVED:
+    # 比对的是**第一个点之前**那一段（并 trim 尾随空格），因为 Windows 就是这么认
+    # 保留设备名的。用 Path(name).stem 会漏——它取的是**最后**一个后缀，
+    # `nul.md.md` 的 stem 是 "nul.md"，一比对就放行了，可写盘时 write_text
+    # 照样返回成功、磁盘上照样什么都没有，页面静默消失。
+    head = name.split(".", 1)[0].rstrip(" ").upper()
+    if head in _RESERVED:
         raise ProtocolError(
-            f"{stem} 是 Windows 保留设备名，写它不会在磁盘上产生文件：{raw}"
+            f"{head} 是 Windows 保留设备名，写它不会在磁盘上产生文件：{raw}"
         )
-    if name != name.rstrip(". "):
-        raise ProtocolError(f"文件名不能以点或空格结尾：{raw}")
+    # 这里**没有**单独的「结尾不能是点或空格」检查：返回到这里名字必须 .md 结尾
+    # （上面那条挡的），所以 `甲.md.` 之类已经被挡掉了；尾随空格在函数开头
+    # 那两下 .strip() 就没了。写一条永远不执行的检查只会让注释说谎。
     return f"{d}/{name}"
 
 
