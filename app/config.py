@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-flash"
+    # Wiki 编译专用。编译是一次性深度加工，产物质量决定之后所有问答的质量，
+    # 所以用更强的模型；日常问答仍走上面的 flash。
+    ingest_model: str = "deepseek-v4-pro"
 
     # ─── 智谱 AI（Embedding）─────────────────────────────
     zhipu_api_key: str = ""
@@ -38,8 +41,20 @@ class Settings(BaseSettings):
     embedding_model: str = "embedding-3"
     embedding_dim: int = 1024  # 维度建表时固化，改了必须重建索引
 
-    # ─── 知识库 ─────────────────────────────────────────
+    # ─── 知识库（原始素材层，只读）───────────────────────
     knowledge_dir: Path = Path(__file__).resolve().parent.parent / "knowledge"
+
+    # ─── LLM Wiki（编译产物层）──────────────────────────
+    # wiki/ 是纯派生物：任何时刻都能从 knowledge/ + SCHEMA.md 重编出来，
+    # 所以它坏了不用修，删掉重跑即可。
+    wiki_dir: Path = Path(__file__).resolve().parent.parent / "wiki"
+    schema_file: Path = Path(__file__).resolve().parent.parent / "SCHEMA.md"
+    # 页面数不超过这个值时，query 把全部页面全文注入上下文。
+    # 超过才切成「代码打分预筛」，因为那时全量注入的 token 成本开始不划算。
+    wiki_inline_max_pages: int = 15
+    # "wiki" 走 LLM Wiki；"legacy" 回退旧的向量检索。
+    # 注意：本阶段 chat.py 还没接这个开关，它只是先声明出来。
+    chat_backend: str = "wiki"
 
     # ─── 提示词 ─────────────────────────────────────────
     # 必须和 knowledge_dir 分开：knowledge/ 会被 ingest 切块嵌进向量库，提示词不能进去
@@ -80,6 +95,9 @@ class Settings(BaseSettings):
         print(f"DeepSeek  key={_mask(self.deepseek_api_key)}  model={self.deepseek_model}")
         print(f"智谱      key={_mask(self.zhipu_api_key)}  model={self.embedding_model} dim={self.embedding_dim}")
         print(f"PG        {self.pg_dsn_safe}")
+        print(f"编译      model={self.ingest_model}")
+        print(f"Wiki      {self.wiki_dir}")
+        print(f"          内联上限 {self.wiki_inline_max_pages} 页  后端 {self.chat_backend}")
 
 
 settings = Settings()
