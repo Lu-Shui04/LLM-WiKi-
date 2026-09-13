@@ -1,0 +1,26 @@
+# ─── Web 框架 ────────────────────────────────────────
+fastapi
+uvicorn[standard]
+
+# ─── 配置管理 ────────────────────────────────────────
+pydantic
+pydantic-settings
+python-dotenv
+
+# ─── LangChain / LangGraph ──────────────────────────
+# 说明：这里只装 langchain-core 和各集成包，不装 langchain 全家桶。
+# langchain-core 提供 prompt / message / runnable 等基础抽象，够用了。
+langchain-core
+langchain-openai
+langchain-deepseek
+langchain-postgres
+langchain-text-splitters
+langgraph
+
+# ─── 知识库 ──────────────────────────────────────────
+# embedding 直接打智谱 REST，不走 langchain-zhipuai（那个包对 langchain-core 1.x 支持不稳）
+httpx
+numpy
+
+# ─── 数据库 ──────────────────────────────────────────
+psycopg[binary]

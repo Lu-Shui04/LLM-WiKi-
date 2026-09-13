@@ -1,0 +1,623 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>我的 Agent</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1c1f26; --line: #2b3039;
+    --text: #e6e8ec; --dim: #8b93a1; --user: #2563eb; --accent: #34d399;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh;
+    background: var(--bg); color: var(--text);
+    font: 15px/1.7 system-ui, "Microsoft YaHei", sans-serif;
+  }
+
+  /* ── 登录页 ───────────────────────────────────── */
+  #loginScreen {
+    height: 100vh; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 14px; padding: 24px;
+  }
+  /* display:flex 的优先级高于 [hidden] 的 display:none，必须显式关掉 */
+  #loginScreen[hidden] { display: none; }
+  #loginScreen h1 { margin: 0; font-size: 22px; }
+  #loginScreen .hint {
+    margin: 0; max-width: 420px; text-align: center;
+    font-size: 13px; color: var(--dim); line-height: 1.9;
+  }
+  #loginForm { display: flex; gap: 10px; margin-top: 6px; }
+  #loginForm input {
+    width: 200px; padding: 12px 14px; border-radius: 10px;
+    background: var(--panel); color: var(--text);
+    border: 1px solid var(--line); font: inherit; outline: none;
+  }
+  #loginForm input:focus { border-color: var(--user); }
+  #loginForm button {
+    padding: 0 24px; border: 0; border-radius: 10px;
+    background: var(--user); color: #fff; font: inherit; cursor: pointer;
+  }
+  #loginErr { min-height: 20px; font-size: 13px; color: #ff9b9b; }
+
+  /* ── 聊天页 ───────────────────────────────────── */
+  #chatScreen { height: 100vh; display: flex; flex-direction: column; }
+  #chatScreen[hidden] { display: none; }
+  header {
+    padding: 14px 20px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 12px; font-weight: 600;
+  }
+  #who { color: var(--accent); font-weight: 400; font-size: 13px; }
+  #status { font-size: 12px; font-weight: 400; color: var(--dim); }
+  /* 进行中的状态缓慢呼吸，让「正在干活」看得见；完成态回落成灰字，不闪 */
+  #status[data-live="1"] { color: var(--accent); animation: breathe 1.6s ease-in-out infinite; }
+  @keyframes breathe { 50% { opacity: 0.45; } }
+  button.ghost {
+    background: none; border: 1px solid var(--line); color: var(--dim);
+    padding: 4px 12px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 13px;
+  }
+  button.ghost:hover { color: var(--text); border-color: var(--dim); }
+  button.ghost + button.ghost { margin-left: 6px; }
+  /* 「调试」按下去就是收起态，点亮提醒你：屏幕上现在少了东西 */
+  button.ghost.on { color: var(--accent); border-color: var(--accent); }
+  /* 收起时思考块和来源卡片整块隐掉。用 CSS 而不是逐个 DOM 处理，
+     后续新流进来的那些也一并盖住 */
+  main.lean .think, main.lean .src { display: none; }
+  header .spacer { margin-left: auto; }
+  main { flex: 1; overflow-y: auto; padding: 20px; }
+  .msg {
+    max-width: 760px; margin: 0 auto 16px; padding: 10px 14px;
+    border-radius: 10px; white-space: pre-wrap; word-break: break-word;
+  }
+  .msg.user { background: var(--user); width: fit-content; margin-right: 0; }
+  .msg.assistant { background: var(--panel); border: 1px solid var(--line); }
+  .msg.error { background: #3b1d1d; border: 1px solid #7f2b2b; color: #ffb4b4; }
+
+  /* 时间分隔条，微信样式 */
+  .stamp { text-align: center; margin: 16px 0 12px; }
+  .stamp span {
+    font-size: 12px; color: var(--dim);
+    background: #22252c; padding: 3px 10px; border-radius: 10px;
+  }
+
+  /* 思考块：推理模型先出的那段，立刻显示，正文开始后折叠 */
+  .think {
+    font-size: 13px; color: var(--dim); white-space: pre-wrap;
+    border-left: 2px solid var(--line); padding-left: 10px;
+    max-height: 150px; overflow-y: auto; margin-bottom: 10px;
+  }
+  .think[hidden] { display: none; }
+  .think::before {
+    content: "思考中…"; display: block;
+    font-size: 11px; color: var(--accent); margin-bottom: 4px;
+  }
+  .think.settled { max-height: 44px; overflow: hidden; cursor: pointer; }
+  .think.settled::before { content: "已思考（点击展开）"; color: var(--dim); }
+  .think.settled.expanded { max-height: 300px; overflow-y: auto; }
+
+  /* 引用来源：答案下面一行「文档【N】」，点开看切片原文 */
+  .src { margin-bottom: 10px; }
+  .src[hidden] { display: none; }
+  .src-line { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .src-label { color: var(--dim); font-size: 12px; }
+  .src-chip {
+    color: var(--dim); font-size: 12px; cursor: pointer; user-select: none;
+    border: 1px solid var(--line); border-radius: 6px; padding: 1px 7px;
+  }
+  .src-chip:hover { color: var(--text); border-color: var(--accent); }
+  .src-chip.on { color: var(--accent); border-color: var(--accent); }
+  .src-body {
+    margin-top: 8px; border-left: 2px solid var(--accent); padding-left: 10px;
+  }
+  .src-body[hidden] { display: none; }
+  .src-tag { color: var(--accent); font-size: 12px; margin-bottom: 5px; }
+  .src-text {
+    color: var(--dim); font-size: 12px; line-height: 1.65;
+    white-space: pre-wrap; max-height: 260px; overflow-y: auto;
+  }
+
+  /* 正文按 markdown 渲染。.msg 上那条 pre-wrap 得在这儿关掉，
+     不然渲染出来的 <p> 之间会再叠一层换行 */
+  .body { white-space: normal; }
+  .body p { margin: 0 0 8px; }
+  .body > :last-child { margin-bottom: 0; }
+  .body ul, .body ol { margin: 0 0 8px; padding-left: 22px; }
+  .body li { margin: 2px 0; }
+  .body strong { color: #fff; font-weight: 600; }
+  .body code {
+    background: #2a2e37; border-radius: 4px; padding: 1px 5px; font-size: 13px;
+    font-family: ui-monospace, Consolas, monospace;
+  }
+
+  .caret {
+    display: inline-block; width: 7px; height: 15px; margin-left: 2px;
+    background: var(--accent); vertical-align: -2px; animation: blink 1s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  form#form {
+    border-top: 1px solid var(--line); padding: 14px 20px;
+    display: flex; gap: 10px; align-items: flex-end;
+  }
+  textarea {
+    flex: 1; resize: none; height: 52px; max-height: 180px; padding: 12px;
+    background: var(--panel); color: var(--text);
+    border: 1px solid var(--line); border-radius: 10px;
+    font: inherit; outline: none;
+  }
+  textarea:focus { border-color: var(--user); }
+  #send {
+    height: 52px; padding: 0 22px; border: 0; border-radius: 10px;
+    background: var(--user); color: #fff; font: inherit; cursor: pointer;
+  }
+  #send:disabled { opacity: .45; cursor: not-allowed; }
+</style>
+</head>
+<body>
+
+<section id="loginScreen">
+  <h1>我的 Agent</h1>
+  <p class="hint">
+    第一次输入的用户名和密码，就是注册。<br />
+    以后填同样的用户名 + 密码，就能回到你自己的记忆。<br />
+    日常打开浏览器会自动进入，只有换设备或清缓存才需要重填一次。
+  </p>
+  <form id="loginForm">
+    <input id="username" placeholder="用户名" maxlength="32" autocomplete="username" autofocus />
+    <input id="password" type="password" placeholder="密码（至少 6 位）" maxlength="64" autocomplete="current-password" />
+    <button type="submit">进入</button>
+  </form>
+  <div id="loginErr"></div>
+</section>
+
+<section id="chatScreen" hidden>
+  <header>
+    我的 Agent <span id="who"></span> <span id="status">就绪</span>
+    <span class="spacer"></span>
+    <button class="ghost" id="peek" title="显示思考过程和检索来源。面试时保持关闭。">调试</button>
+    <button class="ghost" id="clear">清空</button>
+    <button class="ghost" id="logout">退出</button>
+  </header>
+  <main id="msgs"></main>
+  <form id="form">
+    <textarea id="input" rows="1" placeholder="说点什么… Enter 发送，Shift+Enter 换行"></textarea>
+    <button id="send">发送</button>
+  </form>
+</section>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const msgsEl = $("msgs"), statusEl = $("status"), inputEl = $("input");
+const K_TOKEN = "agent.token", K_USER = "agent.username";
+const MINUTE_MS = 60_000;
+const minuteOf = (ts) => Math.floor(ts / MINUTE_MS);   // 同一分钟内取值相同
+let lastSentAt = 0;         // 上一条消息的时间；初值 0 保证首条必插时间条
+let sending = false;
+
+// ── 身份 ────────────────────────────────────────
+const token = () => localStorage.getItem(K_TOKEN) || "";
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: {
+      "Content-Type": "application/json",
+      ...(token() ? { Authorization: `Bearer ${token()}` } : {}),
+      ...(opts.headers || {}),
+    },
+  });
+  if (res.status === 401) { leaveChat(); throw new Error("登录已过期，请重新登录"); }
+  return res;
+}
+
+function enterChat() {
+  $("who").textContent = localStorage.getItem(K_USER) || "";
+  $("loginScreen").hidden = true;
+  $("chatScreen").hidden = false;
+}
+
+function leaveChat() {
+  localStorage.removeItem(K_TOKEN);
+  $("chatScreen").hidden = true;
+  $("loginScreen").hidden = false;
+  $("loginErr").textContent = "";
+  $("password").value = "";
+  $("username").focus();
+}
+
+// ── 渲染 ────────────────────────────────────────
+function setStatus(text, live = false) {
+  statusEl.textContent = text;
+  statusEl.dataset.live = live ? "1" : "0";
+  console.log(`[status] ${text}`);
+}
+
+// 后端每步都会发 stage，但像「组织回答」这种几十毫秒就过去了，一闪根本看不清。
+// 所以排个队，每个至少停留 STAGE_MIN_MS；正文/思考一进来就把没播完的清掉，
+// 免得「回答中」都开始了，状态还停在「识别意图」。
+const STAGE_MIN_MS = 420;
+const stageQ = [];
+let stageTimer = 0, stageBusy = false;
+
+function setStage(text) {
+  stageQ.push(text);
+  pumpStage();
+}
+
+function pumpStage() {
+  if (stageBusy || !stageQ.length) return;
+  stageBusy = true;
+  setStatus(stageQ.shift(), true);
+  stageTimer = setTimeout(() => { stageBusy = false; pumpStage(); }, STAGE_MIN_MS);
+}
+
+function clearStages() {
+  stageQ.length = 0;
+  clearTimeout(stageTimer);
+  stageBusy = false;
+}
+
+function addBubble(role, text = "") {
+  const el = document.createElement("div");
+  el.className = `msg ${role}`;
+  el.textContent = text;
+  msgsEl.appendChild(el);
+  msgsEl.scrollTop = msgsEl.scrollHeight;
+  return el;
+}
+
+// 今天只给时刻；早于今天带上月/日，跨年再带上年份
+function formatStamp(ts) {
+  const pad = (n) => String(n).padStart(2, "0");
+  const d = new Date(ts), now = new Date();
+  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  if (d.toDateString() === now.toDateString()) return hm;
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (d.toDateString() === yesterday.toDateString()) return `昨天 ${hm}`;
+  if (d.getFullYear() === now.getFullYear()) return `${d.getMonth() + 1}月${d.getDate()}日 ${hm}`;
+  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 ${hm}`;
+}
+
+function insertStamp(ts) {
+  const wrap = document.createElement("div");
+  wrap.className = "stamp";
+  const pill = document.createElement("span");
+  pill.textContent = formatStamp(ts);
+  wrap.appendChild(pill);
+  msgsEl.appendChild(wrap);
+  console.log(`[stamp] ${pill.textContent}`);
+}
+
+// 历史回放：时间条规则和实时发送一致（首条必插，之后换分钟才插）
+function renderHistory(messages) {
+  msgsEl.innerHTML = "";
+  lastSentAt = 0;
+  for (const m of messages) {
+    if (m.role === "user") {
+      const ts = Date.parse(m.created_at);
+      if (minuteOf(ts) !== minuteOf(lastSentAt)) insertStamp(ts);
+      lastSentAt = ts;
+      addBubble("user", m.content);
+    } else if (m.role === "assistant") {
+      // 历史里的回答也走 markdown，不然刷新一下星号又全冒出来了
+      const body = document.createElement("div");
+      body.className = "body";
+      body.innerHTML = mdToHtml(m.content);
+      addBubble("assistant").appendChild(body);
+    }
+  }
+}
+
+// ── markdown 渲染 ───────────────────────────────
+// 模型爱输出 **粗体** 和 - 列表，页面原来是纯文本写入的，星号就裸在字面上。
+// 只认最常用的几种，够用就行——为这个挂个解析库不值当。
+const ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;" };
+const esc = (s) => s.replace(/[&<>]/g, (c) => ESC[c]);
+
+function mdInline(s) {
+  return s
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+}
+
+function mdToHtml(src) {
+  let out = "", list = "", kind = "";
+  const closeList = () => {
+    if (list) { out += `<${kind}>${list}</${kind}>`; list = ""; kind = ""; }
+  };
+  for (const raw of esc(src).split("\n")) {
+    const t = raw.trim();
+    const li = t.match(/^([-*+]|\d+[.、])\s+(.*)$/);
+    if (li) {
+      const k = /^\d/.test(li[1]) ? "ol" : "ul";
+      if (kind && kind !== k) closeList();
+      kind = k;
+      list += `<li>${mdInline(li[2])}</li>`;
+      continue;
+    }
+    closeList();
+    if (t) out += `<p>${mdInline(t)}</p>`;
+  }
+  closeList();
+  return out;
+}
+
+// 模型思考时会念「根据系统提示，问『你叫什么』问的是他」——这话摆在屏幕上就穿帮了。
+// 按句丢掉提到提示词的那些，剩下的照常显示。
+const PROMPT_TALK = /系统提示|提示词|system ?prompt|我的设定|设定里|指令里/;
+const stripPromptTalk = (s) =>
+  s.split(/(?<=[。！？；\n])/).filter((seg) => !PROMPT_TALK.test(seg)).join("");
+
+// 逐块写 DOM 会让浏览器每块重排一次，攒到下一帧统一提交。
+// 两个元素必须当参数传进来：闭包里再读全局变量的话，下一轮 send 一改写，
+// 上一轮挂起的 rAF 就会把文字写进新气泡。
+function makePainter(thinkEl, bodyEl) {
+  let think = "", thinkAll = "", body = "", bodyAll = "", rafId = 0;
+  const flush = () => {
+    rafId = 0;
+    if (think) {
+      thinkAll += think; think = "";
+      thinkEl.textContent = stripPromptTalk(thinkAll);
+    }
+    if (body) {
+      bodyAll += body; body = "";
+      // 每帧重渲染整段：正文撑死几百字，换来流式过程里 ** 就已经是粗体
+      bodyEl.innerHTML = mdToHtml(bodyAll) + '<span class="caret"></span>';
+    }
+    msgsEl.scrollTop = msgsEl.scrollHeight;
+  };
+  return {
+    pushThink(t) { think += t; if (!rafId) rafId = requestAnimationFrame(flush); },
+    pushBody(t) { body += t; if (!rafId) rafId = requestAnimationFrame(flush); },
+    flushNow() {                      // 收尾时同步落盘，别把最后一块留在 rAF 里
+      if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+      flush();
+    },
+  };
+}
+
+// ── 发送 ────────────────────────────────────────
+async function send(text) {
+  sending = true;
+  $("send").disabled = true;
+
+  const now = Date.now();
+  if (minuteOf(now) !== minuteOf(lastSentAt)) insertStamp(now);   // 换分钟才插
+  lastSentAt = now;
+
+  addBubble("user", text);
+
+  const bubble = addBubble("assistant");
+  const thinkEl = document.createElement("div");
+  thinkEl.className = "think";
+  thinkEl.hidden = true;
+  thinkEl.addEventListener("click", () => thinkEl.classList.toggle("expanded"));
+  const bodyEl = document.createElement("div");
+  bodyEl.className = "body";
+  bubble.append(thinkEl, bodyEl);
+  const painter = makePainter(thinkEl, bodyEl);
+
+  let thinkLen = 0, bodyLen = 0, chunks = 0, sawThinking = false;
+  setStatus("连接中…", true);
+
+  try {
+    const res = await api("/api/chat", { method: "POST", body: JSON.stringify({ text }) });
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+
+    const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += value;
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop();                    // 最后一段可能是半截帧
+      for (const frame of frames) {
+        const line = frame.split("\n").find((l) => l.startsWith("data: "));
+        if (!line) continue;
+        handle(JSON.parse(line.slice(6)));
+      }
+    }
+  } catch (err) {
+    console.error("[error]", err);
+    painter.flushNow();
+    caret.remove();
+    addBubble("error", String(err.message || err));
+    setStatus("出错");
+  } finally {
+    sending = false;
+    $("send").disabled = false;
+    inputEl.focus();
+  }
+
+  function handle(evt) {
+    // stage 走排队显示；其余都是真内容，一进来就把没播完的状态清掉，别盖住实话
+    if (evt.type !== "stage") clearStages();
+
+    if (evt.type === "start") {
+      console.log(`[start] 模型 ${evt.model}`);
+    } else if (evt.type === "stage") {
+      setStage(evt.text);
+    } else if (evt.type === "sources") {
+      // 压根没查知识库（寒暄、问助手能力这类）就别摆这张卡片了——
+      // 对着「你好」回一句「知识库里没有相关内容」纯属噪音
+      if (!evt.items.length && evt.searched === false) return;
+
+      const box = document.createElement("div");
+      box.className = "src";
+      const line = document.createElement("div");
+      line.className = "src-line";
+
+      const label = document.createElement("span");
+      label.className = "src-label";
+      label.textContent = evt.items.length ? "来源" : "知识库里没有相关内容";
+      line.appendChild(label);
+
+      const panel = document.createElement("div");
+      panel.className = "src-body";
+      panel.hidden = true;
+      let open = null;                      // 当前展开的是哪个 chip，再点一次收起
+
+      for (const it of evt.items) {
+        const chip = document.createElement("span");
+        chip.className = "src-chip";
+        chip.textContent = `${it.doc}【${it.n}】`;
+        chip.title = it.title;              // 完整标题路径挂 tooltip
+        chip.addEventListener("click", () => {
+          if (open === chip) {
+            panel.hidden = true;
+            chip.classList.remove("on");
+            open = null;
+            return;
+          }
+          if (open) open.classList.remove("on");
+          open = chip;
+          chip.classList.add("on");
+          panel.hidden = false;
+          const tag = document.createElement("div");
+          tag.className = "src-tag";
+          tag.textContent = `${it.doc}【${it.n}】${it.title.split(" > ").join(" › ")}`;
+          const txt = document.createElement("div");
+          txt.className = "src-text";
+          txt.textContent = it.text || "（这条没有切片内容）";
+          panel.replaceChildren(tag, txt);
+        });
+        line.appendChild(chip);
+      }
+
+      box.appendChild(line);
+      if (evt.items.length) box.appendChild(panel);
+      bubble.insertBefore(box, bodyEl);
+    } else if (evt.type === "thinking") {
+      if (!sawThinking) {
+        sawThinking = true;
+        thinkEl.hidden = false;
+        setStatus("思考中…", true);
+      }
+      thinkLen += evt.text.length;
+      painter.pushThink(evt.text);            // 提到「系统提示」的那几句由 painter 丢掉
+    } else if (evt.type === "token") {
+      if (sawThinking && !thinkEl.classList.contains("settled")) {
+        thinkEl.classList.add("settled");     // 正文开始，思考折叠
+      }
+      bodyLen += evt.text.length;
+      chunks++;
+      painter.pushBody(evt.text);
+      setStatus(`回答中 · ${bodyLen} 字`, true);
+    } else if (evt.type === "error") {
+      console.error("[error]", evt.message);
+      painter.flushNow();
+      caret.remove();
+      bubble.remove();
+      addBubble("error", evt.message);
+      setStatus("出错");
+    } else if (evt.type === "done") {
+      painter.flushNow();                     // 先把尾块写进 DOM
+      bodyEl.querySelector(".caret")?.remove();
+      if (sawThinking) thinkEl.classList.add("settled");
+      setStatus(`完成 · 思考 ${thinkLen} 字 / 正文 ${bodyLen} 字 / ${chunks} 块`);
+    }
+  }
+}
+
+// ── 事件绑定 ────────────────────────────────────
+$("loginForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const username = $("username").value.trim();
+  const password = $("password").value;
+  if (!username) return;
+  if (password.length < 6) { $("loginErr").textContent = "密码至少 6 位"; return; }
+  $("loginErr").textContent = "";
+  try {
+    const res = await fetch("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      // 校验失败时 FastAPI 的 detail 是数组，不能直接塞进 textContent
+      $("loginErr").textContent =
+        typeof body.detail === "string" ? body.detail : `登录失败 HTTP ${res.status}`;
+      return;
+    }
+    const data = await res.json();
+    localStorage.setItem(K_TOKEN, data.session_token);
+    localStorage.setItem(K_USER, data.username);
+    $("password").value = "";
+    await loadHistory(data.is_new_user ? "注册成功，开始聊吧" : "欢迎回来");
+  } catch (err) {
+    $("loginErr").textContent = String(err.message || err);
+  }
+});
+
+async function loadHistory(greeting) {
+  enterChat();
+  try {
+    const res = await api("/api/history");
+    const data = await res.json();
+    renderHistory(data.messages);
+    setStatus(`${greeting} · 历史 ${data.messages.length} 条`);
+  } catch (err) {
+    console.error("[history]", err);
+    setStatus("历史载入失败");
+  }
+}
+
+$("form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const text = inputEl.value.trim();
+  if (!text || sending) return;
+  inputEl.value = "";
+  send(text);
+});
+
+inputEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    $("form").requestSubmit();
+  }
+});
+
+// 思考过程、知识库来源、进度阶段都照常显示——那正是这个 Agent 拿得出手的东西，藏了反而没得看。
+// 「调试」留着做反向开关：真到面试官凑过来看屏幕，一键把思考块和来源卡片收掉。
+let debugView = true;
+$("peek").classList.add("on");
+$("peek").addEventListener("click", () => {
+  debugView = !debugView;
+  $("peek").classList.toggle("on", debugView);
+  msgsEl.classList.toggle("lean", !debugView);   // 后续新流进来的也一并盖住
+  setStatus(debugView ? "完整视图" : "已收起思考与来源");
+});
+
+$("clear").addEventListener("click", async () => {
+  msgsEl.innerHTML = "";
+  lastSentAt = 0;
+  setStatus("正在清空…", true);
+  try {
+    await api("/api/history", { method: "DELETE" });
+    setStatus("已清空，从头开始聊");
+  } catch (err) {
+    // 服务端没清掉必须说出来：界面空着、上下文还在，下一轮回答会莫名其妙
+    setStatus("清空失败，历史还在服务端");
+    console.error("[clear]", err);
+  }
+});
+
+$("logout").addEventListener("click", async () => {
+  try { await api("/api/logout", { method: "POST" }); } catch (err) { console.warn(err); }
+  msgsEl.innerHTML = "";
+  lastSentAt = 0;
+  leaveChat();
+});
+
+// ── 启动 ────────────────────────────────────────
+(async () => {
+  if (!token()) { $("username").focus(); return; }
+  await loadHistory("欢迎回来");
+})();
+</script>
+</body>
+</html>
