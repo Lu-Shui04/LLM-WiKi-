@@ -6,6 +6,7 @@
 index.md 和 log.md 由**代码**渲染/追加，LLM 不写：
 让模型直接写 index 会漏页、写错路径、忘记更新，而这是纯机械汇总，代码做零成本零幻觉。
 """
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -122,17 +123,41 @@ def commit(
     if errors:
         raise CommitError(errors)
 
-    for p in writes:                    # 阶段二：到这里已经不可能失败了
-        _write(p, base)
+    # 阶段二：**先全部写进 .tmp，再统一起名**。
+    # 直接 write_text 到正式路径的话，第 3 个文件失败时前 2 个已经落盘了——
+    # 那正是「半成品 wiki」。分两步之后，写这一步骤失败只会留下 .tmp，
+    # 正式文件一个都没动。
+    # （改名本身也可能失败，那种情况没有备份是回滚不了的——诚实记在这里，
+    #   但改名的失败概率比写低得多。真出错时异常信息会说清是哪种。）
+    staged: list[Page] = []
+    try:
+        for p in writes:
+            _stage(p, base)
+            staged.append(p)
+        for p in writes:
+            _place(p, base)
+    except OSError as exc:
+        for p in staged:
+            _tmp_path(base, p.rel).unlink(missing_ok=True)
+        raise CommitError([f"写盘失败（正式文件未被改动）：{exc}"]) from exc
 
     write_index(read_all(base), base)
     return writes, warns
 
 
-def _write(p: Page, base: Path) -> None:
-    path = base / p.rel
+def _tmp_path(base: Path, rel: str) -> Path:
+    return base / (rel + ".tmp")
+
+
+def _stage(p: Page, base: Path) -> None:
+    path = _tmp_path(base, p.rel)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(frontmatter.dump(p.meta, p.body), encoding="utf-8")
+
+
+def _place(p: Page, base: Path) -> None:
+    """.tmp → 正式名。走 os.replace：同名是覆盖，没有「写一半」的中间态。"""
+    os.replace(_tmp_path(base, p.rel), base / p.rel)
 
 
 # ─── 索引与日志（代码渲染）───────────────────────────

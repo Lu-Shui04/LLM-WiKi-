@@ -2,7 +2,7 @@
 title: 订单Agent与工具调用
 type: concept
 summary: 订单 Agent 走专门工具调用路径，温度设 0、Prompt 和工具描述明确禁止凭空回答，接口数据用于生成
-tags: [订单Agent, 工具调用, 防幻觉, 速购客服]
+tags: [工具调用, 订单, Agent]
 contradictions: none
 sources: [我的简历.md, 常见问题回答.md]
 created: 2026-09-13

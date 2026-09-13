@@ -54,6 +54,17 @@ def test_摘要页只补一个_不会重复():
         raise AssertionError("两个摘要页撞车时应当报错")
 
 
+def test_大小写不同但同名的页面要报错():
+    # NTFS 不分大小写：这两个是同一个文件。不报错的话两份都写进去，
+    # 后写的那份 os.replace 盖掉前一份，最后 wiki/ 里少一页而计划里列着两条。
+    try:
+        compiler._items(_plan([_p("RAG"), _p("rag")]), "我的简历.md")
+    except CompileError as exc:
+        assert "撞到同一路径" in str(exc)
+    else:
+        raise AssertionError("仅大小写不同的两个 slug 应当报错")
+
+
 # ─── op 的合法性 ─────────────────────────────────────
 def test_非法_op_退化成_create():
     items = compiler._items(_plan([_p("意图路由", op="rewrite")]), "我的简历.md")
@@ -109,6 +120,24 @@ def test_解析不出_JSON_时报错并带上字数():
         assert "没有返回可解析的 JSON" in str(exc)
     else:
         raise AssertionError("非 JSON 应当报错")
+
+
+# ─── 日志围栏（推理正文可能自带反引号）───────────────
+def test_推理里没有反引号时用三根():
+    assert compiler._fence_for("普通推理正文") == "```"
+
+
+def test_推理里有三根反引号时升到四根():
+    # 不升的话：模型吐的 ``` 会把围栏提前闭合，后面的推理漏成正文渲染
+    assert compiler._fence_for("前面\n```\n后面") == "````"
+
+
+def test_围栏总比最长反引号串长一根():
+    assert compiler._fence_for("`````") == "``````"
+
+
+def test_单根反引号不影响围栏():
+    assert compiler._fence_for("`code`") == "```"
 
 
 # ─── 计划外页面的兜底 ────────────────────────────────

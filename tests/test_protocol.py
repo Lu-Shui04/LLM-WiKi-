@@ -74,3 +74,49 @@ def test_多级目录被拒():
 
 def test_反斜杠按分隔符处理():
     assert check_rel("concepts\\甲.md") == "concepts/甲.md"
+
+
+def test_总览页大小写不敏感():
+    # _FILE 本身带 IGNORECASE，模型写 Overview.md 不该让整次编译作废
+    assert check_rel("Overview.md") == "overview.md"
+    assert check_rel("OVERVIEW.MD") == "overview.md"
+
+
+# ─── Windows 文件名硬伤：写盘会「成功」但磁盘上没有文件 ──────────
+def test_中文冒号被拒():
+    # NTFS 把 : 当数据流（ADS）：会在磁盘上留下一个叫 chunkSize 的空文件，
+    # 正文进 ADS，此后 read_all 永远读不到这一页——静默丢页。
+    with pytest.raises(ProtocolError):
+        check_rel("concepts/chunkSize: 500.md")
+
+
+def test_其他非法字符被拒():
+    for bad in ('concepts/丙?.md', 'concepts/甲|乙.md', 'concepts/甲*.md',
+                'concepts/甲"乙.md', 'concepts/甲<乙.md', 'concepts/甲>乙.md'):
+        with pytest.raises(ProtocolError):
+            check_rel(bad)
+
+
+def test_保留设备名被拒():
+    # 即使带扩展名，写它 write_text 也会成功返回，而磁盘上什么都没有
+    with pytest.raises(ProtocolError):
+        check_rel("concepts/nul.md")
+    with pytest.raises(ProtocolError):
+        check_rel("concepts/AUX.md")
+    with pytest.raises(ProtocolError):
+        check_rel("concepts/COM1.md")
+
+
+def test_以点结尾被拒():
+    # Windows 会静默吃掉文件名结尾的点和空格，写出来的文件名和 rel 对不上，
+    # 于是 by_rel 查不到它、页面掉进「计划外页面」分支。
+    # （结尾空格那一种到不了这里——check_rel 开头就把整个 rel strip 掉了。）
+    with pytest.raises(ProtocolError):
+        check_rel("concepts/甲.md.")
+    with pytest.raises(ProtocolError):
+        check_rel("concepts/甲.md..")
+
+
+def test_名字里带点的正常文件不受影响():
+    # 只有**结尾**的点是硬伤，concepts/v1.2 这种中间带点的必须放行
+    assert check_rel("concepts/RAG 2.0.md") == "concepts/RAG 2.0.md"

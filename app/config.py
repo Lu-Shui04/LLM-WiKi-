@@ -18,6 +18,15 @@ def _mask(value: str) -> str:
     return "***" if len(value) <= 10 else f"{value[:6]}...{value[-4:]}"
 
 
+class ConfigError(RuntimeError):
+    """缺必需配置。
+
+    单独一个类型是为了让调用方能**只**接住这一类，而不是把所有 RuntimeError
+    都当成配置问题——那样别的真 bug 会被误导成「去填 .env」。
+    继承 RuntimeError 是刻意的：不破坏既有的 except RuntimeError。
+    """
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=_ENV_FILE,
@@ -88,7 +97,7 @@ class Settings(BaseSettings):
         missing = [f for f in fields if not getattr(self, f, "")]
         if missing:
             names = "\n".join(f"  - {f.upper()}" for f in missing)
-            raise RuntimeError(f"\n缺少必需配置：\n{names}\n请填写：{_ENV_FILE}\n")
+            raise ConfigError(f"\n缺少必需配置：\n{names}\n请填写：{_ENV_FILE}\n")
 
     def report(self) -> None:
         print(f".env：{_ENV_FILE}  {'已找到' if _ENV_FILE.exists() else '不存在'}")

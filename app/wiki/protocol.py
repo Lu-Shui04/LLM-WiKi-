@@ -21,6 +21,19 @@ from app.wiki import paths
 _FILE = re.compile(r"^===\s*FILE\s*:\s*(.+?)\s*===\s*$", re.IGNORECASE)
 _FENCE = re.compile(r"^\s*```[a-zA-Z0-9_-]*\s*$")
 
+# Windows 不允许出现在文件名里的字符。`: ` 尤其阴——NTFS 把它当数据流（ADS），
+# 写 "chunkSize: 500.md" 会在磁盘上留下一个名为 chunkSize 的空文件，正文进 ADS，
+# 之后 read_all 永远读不到这一页。这些都必须挡在写盘之前。
+_BAD_NAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+# Windows 保留设备名：即使带扩展名（"nul.md"）也不能用，
+# 写它 write_text 会**成功返回**而磁盘上什么都没有——页面静默消失。
+_RESERVED = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
 
 class ProtocolError(ValueError):
     """路径不合法，或整段输出里一个文件标记都没有。"""
@@ -65,7 +78,9 @@ def check_rel(raw: str) -> str:
     parts = [p for p in rel.split("/") if p not in ("", ".")]
     if any(p == ".." for p in parts):
         raise ProtocolError(f"不接受上级目录：{raw}")
-    if parts == [paths.OVERVIEW]:
+    # 大小写不敏感地认总览页：分隔符协议本身就是大小写不敏感的
+    # （_FILE 带 IGNORECASE），模型写 Overview.md 不该废掉整次编译。
+    if len(parts) == 1 and parts[0].casefold() == paths.OVERVIEW.casefold():
         return paths.OVERVIEW           # 总览页在根目录，是唯一的例外
 
     if len(parts) != 2:
@@ -77,6 +92,22 @@ def check_rel(raw: str) -> str:
         )
     if not name.endswith(".md") or name == ".md":
         raise ProtocolError(f"只接受 .md 文件：{raw}")
+
+    # 文件名字符集也要挡。这里**拒绝而不是自动改名**：改名之后 rel 就和模型写的
+    # ===FILE: 标记对不上了，页面会掉进「计划外页面」分支——对摘要页来说，
+    # 那意味着 source_sha/compiler_fp 落不到该落的页上，增量跳过永久失效。
+    # 宁可整次编译硬失败（一个字都没写），也不要悄悄换个名字。
+    if _BAD_NAME.search(name):
+        raise ProtocolError(
+            f"文件名里有 Windows 不允许的字符（写盘时会静默失败或变成数据流）：{raw}"
+        )
+    stem = Path(name).stem
+    if stem.upper() in _RESERVED:
+        raise ProtocolError(
+            f"{stem} 是 Windows 保留设备名，写它不会在磁盘上产生文件：{raw}"
+        )
+    if name != name.rstrip(". "):
+        raise ProtocolError(f"文件名不能以点或空格结尾：{raw}")
     return f"{d}/{name}"
 
 

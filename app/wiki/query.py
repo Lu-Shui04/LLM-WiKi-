@@ -12,6 +12,7 @@
 仍然是确定性的、可单测的，**不碰向量检索**。
 """
 import asyncio
+import difflib
 import re
 import sys
 from pathlib import Path
@@ -21,7 +22,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from app.config import settings
 from app.core import prompt
 from app.core.llm import get_chat_model
-from app.wiki import frontmatter, store
+from app.wiki import frontmatter, paths, store
 
 TOP_N = 8           # 打分预筛时取前几个
 
@@ -65,7 +66,21 @@ def collect(question: str, pages: str | None = None) -> list[store.Page]:
     if len(all_pages) <= settings.wiki_inline_max_pages:
         return all_pages
 
-    return sorted(all_pages, key=lambda p: -_score(question, p))[:TOP_N]
+    ranked = sorted(all_pages, key=lambda p: -_score(question, p))
+    picked = ranked[:TOP_N]
+
+    # 摘要页和总览页**永远入选**，不参与打分竞争。
+    # 打分只看标题/标签/摘要的字符二元组；当问题跟所有页面的元信息都没有重合时
+    # （英文提问、单字提问、「联系方式」这种不出现在任何 summary 里的词），
+    # 全部页面同为 0 分 → sorted 稳定 → 退化成按路径排序 → `summaries/` 因为
+    # 字典序排在最后被整批挤出去。而基本信息、联系方式**恰恰只写在摘要页里**，
+    # 也就是说打分最失灵的场景正好是它最该保住的场景。
+    # 这两个页面加起来不到全文的一小部分，不值得为省这点上下文冒漏掉的风险。
+    must = [p for p in all_pages
+            if p.rel == paths.OVERVIEW
+            or p.rel.startswith(f"{paths.TYPE_DIR['summary']}/")]
+    have = {p.rel for p in picked}
+    return picked + [p for p in must if p.rel not in have]
 
 
 def build_context(pages: list[store.Page]) -> str:
@@ -106,6 +121,19 @@ async def _answer(question: str, pages: list[store.Page]) -> int:
     cited = sorted({c for c in frontmatter.links(text)})
     if cited:
         print("\n引用：" + "、".join(f"[[{c}]]" for c in cited))
+        # 引用是给小米**跳转追溯**用的，所以名字必须真能对上页面——而模型有把
+        # 标题「顺口改写」的毛病（实测把 订单Agent工具调用 写成 订单Agent与工具调用，
+        # 多插了一个「与」）。引用错一个字，这行的价值就从「追溯」变成「误导」。
+        # 提示词里已经写了要原样照抄，但那是软的；这里是硬的。
+        known = store.titles_of(store.read_all())
+        dead = [c for c in cited if c not in known]
+        if dead:
+            hints = []
+            for c in dead:
+                near = difflib.get_close_matches(c, sorted(known), n=1, cutoff=0.6)
+                hints.append(f"{c}（是不是 [[{near[0]}]]？）" if near else c)
+            print("[告警] 引用里有 wiki/ 里不存在的页面名，点不开："
+                  + "、".join(hints))
     return 0
 
 

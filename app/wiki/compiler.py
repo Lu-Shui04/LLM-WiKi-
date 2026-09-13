@@ -219,11 +219,17 @@ def _items(plan: dict, source_name: str) -> list[Item]:
     if not any(i.type == "summary" for i in out):
         out.insert(0, Item(type="summary", op="create", title=stem, summary="", slug=stem))
 
+    # 唯一性检查必须**大小写不敏感**：NTFS 不分大小写，RAG.md 和 rag.md 是同一个
+    # 文件。不查的话两份都会写进去，后写的 os.replace 盖掉先写的，最后
+    # read_all 只读回一个页面，而计划里明明白白列着两条——页面静默少一个。
     seen: set[str] = set()
     for i in out:
-        if i.rel in seen:
-            raise CompileError(f"计划里有两个页面撞到同一路径：{i.rel}")
-        seen.add(i.rel)
+        key = i.rel.casefold()
+        if key in seen:
+            raise CompileError(
+                f"计划里有两个页面撞到同一路径（Windows 下不分大小写）：{i.rel}"
+            )
+        seen.add(key)
     return out
 
 
@@ -367,6 +373,13 @@ async def ingest(
     src = _resolve(source)
     if not src.is_file():
         raise CompileError(f"找不到源文档：{src}")
+    # paths.SKIP_SOURCES 的注释写着「和 app/core/ingest.py 的 SKIP 保持一致，
+    # 否则同一份 README 会在旧库进切块、在新库进编译，两边对不上」——
+    # 但这个集合此前只在 source_files()（批量入口）里生效，单文件 ingest 绕过了它。
+    if src.name in paths.SKIP_SOURCES:
+        raise CompileError(
+            f"{src.name} 是说明文档、不算知识，跳过（与 app/core/ingest.py 的 SKIP 一致）"
+        )
 
     raw = src.read_text(encoding="utf-8")
     name = src.name
@@ -409,17 +422,42 @@ async def ingest(
     # 让它在这种时候 skip 的话，摘要页的 compiler_fp 永远追不上当前值——
     # 于是每次 ingest 都判「规则变了」→ 重编 → 又被 skip，**永久空转**，
     # 页面还永远停在旧规则的产物上。这个判断只能由代码做。
-    rebuild = force or (
+    #
+    # 而且要看**所有**摘要页，不能只看本次这一份：fp 是全局的。
+    # 只看本次的话，ingest A、ingest B、改 SCHEMA、再 ingest C——
+    # C 的摘要页是全新的（old_summary 为 None）→ 判「不用重编」→
+    # A 和 B 带着旧 fp 永远留在那儿，规则变了却只有 C 是新产物。
+    # 只收「源文档还在 knowledge/ 里」的摘要页：源文档被删之后那一页不会有
+    # 任何一次 ingest 去刷新它，让它参与投票等于让 rebuild 永远为真。
+    stored_fps = {
+        str(p.meta.get("compiler_fp", ""))
+        for p in pages_now
+        if p.meta.get("type") == "summary"
+        and (settings.knowledge_dir / Path(p.rel).name).is_file()
+    }
+    rebuild = force or any(f != fp for f in stored_fps)
+    # 源文档内容变了也必须重写摘要页——和 fp 那条是同一类失效：
+    # 模型看不到旧原文，判不出「跟上次比变了什么」；内容只是小改时它照样会说
+    # skip，于是 source_sha 永远停在旧值，之后每次 ingest 都白跑一遍四步编译。
+    sha_changed = (
         old_summary is not None
-        and str(old_summary.meta.get("compiler_fp", "")) != fp
+        and str(old_summary.meta.get("source_sha", "")) != sha
     )
+
     for i in items:
+        if i.op == "skip" and not store.exists(i.rel):
+            # skip 的语义是「这页没有新东西，别动它」，前提是它已经在了。
+            # 页面根本不存在时静默 skip，会让它混进 untouched 装成「已存在的旧页」，
+            # 而知识库里其实是缺的——分析阶段规划过它，说明它本该有。
+            warns.append(f"{i.rel}：op 是 skip 但页面不存在，改为 create")
+            i.op = "create"
         if i.op == "create" and store.exists(i.rel):
             # 挡住「每次造一个略不同的 slug 导致页面分裂」
             warns.append(f"{i.rel}：op 是 create 但页面已存在，降级为 update")
             i.op = "update"
-        elif i.op == "skip" and rebuild:
-            warns.append(f"{i.rel}：编译规则有变，skip 升级为 update（整页重编）")
+        elif i.op == "skip" and (rebuild or (sha_changed and i.type == "summary")):
+            why = "编译规则有变" if rebuild else "源文档内容变了"
+            warns.append(f"{i.rel}：{why}，skip 升级为 update（整页重编）")
             i.op = "update"
 
     known = store.titles_of(pages_now) | {i.title for i in items} | {i.slug for i in items}
@@ -469,6 +507,14 @@ async def ingest(
     seen: set[str] = set()
 
     for rel, text in texts:
+        # 摘要页落在哪个路径由**代码**说了算（同 _items 里那段注释）。模型偶尔
+        # 会写到 summaries/<别的名字>.md，甚至塞进 concepts/。不纠正的话这一页
+        # 走 _ad_hoc 分支，而 _ad_hoc 造出来的 Item 不带 source_sha/compiler_fp
+        # （那两行只在 rel == paths.summary_rel(name) 时才加）——增量跳过从此
+        # 永久失效，且失效得毫无痕迹：每次 ingest 都重编，没人会想到是页名的问题。
+        if rel != s_rel and paths.DIR_TYPE.get(rel.split("/")[0]) == "summary":
+            warns.append(f"{rel}：摘要页只能写 {s_rel}，已改到该路径")
+            rel = s_rel
         item = by_rel.get(rel)
         if item is None:
             # 生成阶段模型自己多写的页面。它读的是全文，判断可能比分析阶段更全，
@@ -478,14 +524,16 @@ async def ingest(
         if item.op == "skip":
             warns.append(f"{rel}：op 是 skip，丢弃生成内容")
             continue
-        if rel in seen:
+        # 同 _items：大小写不敏感。by_rel 只按原样查，concepts/RAG.md 和
+        # concepts/rag.md 在 by_rel 里是两条，但落盘时是同一个文件。
+        if rel.casefold() in seen:
             warns.append(f"{rel}：模型重复输出了同一个页面，只保留第一份")
             continue
         meta, body = frontmatter.parse(text)
         if not body.strip():
             warns.append(f"{rel}：生成内容为空，已忽略")
             continue
-        seen.add(rel)
+        seen.add(rel.casefold())
         writes.append(_finalize(rel, meta, body, item, name, today, sha, fp, olds.get(rel)))
 
     if not writes:
@@ -532,6 +580,17 @@ def _finalize(rel, meta, body, item: Item, source_name: str, today: str,
     return store.Page(rel=rel, meta=meta, body=body)
 
 
+def _fence_for(text: str) -> str:
+    """选一个不会被这段文本自己撑破的围栏。
+
+    推理正文里本来就带 Markdown 小标题，也可能吐出 ``` ——固定用三个反引号的话，
+    它一吐围栏，后面的推理就漏成正文渲染了。规则照 CommonMark：
+    比文本里最长的反引号串再长一根。
+    """
+    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    return "`" * max(3, longest + 1)
+
+
 def _log_section(res: Result, show_reasoning: bool) -> str:
     u = res.usage or {}
     fmt = lambda xs: "、".join(xs) if xs else "（无）"
@@ -554,8 +613,9 @@ def _log_section(res: Result, show_reasoning: bool) -> str:
         text = res.reasoning
         if len(text) > REASONING_LOG_LIMIT:
             text = text[:REASONING_LOG_LIMIT] + f"\n\n…（共 {len(res.reasoning):,} 字，此处截断）"
+        fence = _fence_for(text)
         lines += ["", "<details><summary>编译推理（草稿，非页面内容）</summary>", "",
-                  "```", text, "```", "", "</details>"]
+                  fence, text, fence, "", "</details>"]
     return "\n".join(lines)
 
 

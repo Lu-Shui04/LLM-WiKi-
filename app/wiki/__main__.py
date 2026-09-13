@@ -81,6 +81,7 @@ def main(argv=None) -> int:
     # CompileError 是编译流程本身的问题（截断、没有 pages）；
     # ProtocolError 是模型输出的路径不合法（这条是故意硬失败的，见 protocol.py）；
     # CommitError 是落盘前校验没过。三者都是「一个字都没写」。
+    from app.config import ConfigError
     from app.wiki import compiler, protocol, store
 
     try:
@@ -99,9 +100,15 @@ def main(argv=None) -> int:
         print(f"编译失败：模型输出的文件路径不合法（{exc}）。本次没有写盘。",
               file=sys.stderr)
         return 1
+    # 不在这里断言「本次没有写盘」——校验失败确实是零写盘，但**写盘过程中**
+    # 失败可能已经改名了一部分。准确的情况由上面那条异常消息自己说。
     except store.CommitError as exc:
         print(f"编译失败：{exc}", file=sys.stderr)
-        print("本次没有写盘。", file=sys.stderr)
+        return 1
+    except ConfigError as exc:
+        # 漏填 .env 是照着 README 走最容易漏的一步，不该让用户对着 traceback 猜。
+        print(f"配置有问题：{exc}", file=sys.stderr)
+        print("（照 .env.example 复制一份 .env 填上 key 即可）", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         print("\n已中断。本次没有写盘。", file=sys.stderr)
