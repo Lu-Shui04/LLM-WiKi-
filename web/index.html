@@ -85,7 +85,7 @@
   #loginErr { min-height: 20px; margin-top: 10px; font-size: 13px; color: var(--danger); }
 
   /* ── 聊天页 ───────────────────────────────────── */
-  #chatScreen { height: 100%; display: flex; flex-direction: column; }
+  #chatScreen { position: relative; height: 100%; display: flex; flex-direction: column; }
   #chatScreen[hidden] { display: none; }
   header {
     position: sticky; top: 0; z-index: 20; flex: none;
@@ -122,7 +122,25 @@
      后续新流进来的那些也一并盖住 */
   main.lean .think, main.lean .src { display: none; }
 
-  main { flex: 1; overflow-y: auto; padding: 26px 18px 8px; scroll-behavior: smooth; }
+  /* 这里**不能**加 scroll-behavior: smooth。跟随的判断是「贴底了吗」，
+     而平滑滚动会让容器在好几帧里停在半路——下一帧一问就答「没贴底」，
+     于是不跟了；可动画还在往旧目标爬，内容却不停变长，就永远追不上。
+     要滚就一步到位。 */
+  main { flex: 1; overflow-y: auto; padding: 26px 18px 8px; }
+  /* 往上翻的时候才冒出来。流式输出中内容一直在长，靠手滚回底部很难，
+     所以必须有这一颗。 */
+  #toBottom {
+    position: absolute; left: 50%; bottom: 100px; z-index: 15;
+    transform: translateX(-50%) translateY(8px);
+    display: flex; align-items: center; gap: 6px;
+    padding: 7px 14px; border-radius: 999px; cursor: pointer;
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--line); box-shadow: var(--shadow);
+    font-size: 13px; opacity: 0; pointer-events: none;
+    transition: opacity .16s, transform .16s, border-color .16s;
+  }
+  #toBottom.on { opacity: 1; pointer-events: auto; transform: translateX(-50%) translateY(0); }
+  #toBottom:hover { border-color: var(--dim); }
   .row {
     max-width: 880px; margin: 0 auto 18px;
     display: flex; gap: 11px; align-items: flex-start;
@@ -354,6 +372,12 @@
     <button class="ghost" id="logout">退出</button>
   </header>
   <main id="msgs"></main>
+  <button id="toBottom" type="button" aria-label="回到最新">
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+         stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 5v14M19 12l-7 7-7-7" />
+    </svg>回到最新
+  </button>
   <form id="form">
     <div class="composer">
       <textarea id="input" rows="1" placeholder="说点什么… Enter 发送，Shift+Enter 换行"></textarea>
@@ -388,6 +412,21 @@ const MINUTE_MS = 60_000;
 const minuteOf = (ts) => Math.floor(ts / MINUTE_MS);   // 同一分钟内取值相同
 let lastSentAt = 0;         // 上一条消息的时间；初值 0 保证首条必插时间条
 let sending = false;
+
+// ── 跟着滚，还是别动 ───────────────────────────
+// 判断只有一句话：**在内容变长之前**，人是不是本来就贴着底。
+// 是 → 跟着滚；不是 → 一个字都不动滚动条，人家往上翻旧内容时不许抢。
+// 特意不去用 scroll 事件记状态：那要靠「用户滚的」和「程序滚的」互相区分，
+// 中间态一多就误判（实测就栽在这）。直接问「现在贴底吗」，没有状态可失。
+const NEAR_BOTTOM = 80;     // 离底这么近就算还在底部，免得差几像素就断了跟随
+const bottomGap = () => msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight;
+const atBottom = () => bottomGap() <= NEAR_BOTTOM;
+const toBottomEl = $("toBottom");
+const pinBottom = () => { msgsEl.scrollTop = msgsEl.scrollHeight; };
+// 这颗按钮只管提示「下面还有内容」，跟不跟随与它无关
+const markBtn = () => toBottomEl.classList.toggle("on", !atBottom());
+msgsEl.addEventListener("scroll", markBtn);
+toBottomEl.addEventListener("click", () => { pinBottom(); markBtn(); });
 
 // ── 身份 ────────────────────────────────────────
 const token = () => localStorage.getItem(K_TOKEN) || "";
@@ -456,6 +495,7 @@ function clearStages() {
 // 一行 = 头像 + 气泡。返回值仍是**气泡**本身，调用方照旧往它里面塞思考块、
 // 来源行和正文；要丢掉整行时用 dropRow（气泡的父节点就是那一行）。
 function addBubble(role, text = "") {
+  const follow = atBottom();      // 先问，再往 DOM 里塞
   const row = document.createElement("div");
   row.className = `row ${role}`;
 
@@ -471,7 +511,7 @@ function addBubble(role, text = "") {
 
   row.append(av, el);
   msgsEl.appendChild(row);
-  msgsEl.scrollTop = msgsEl.scrollHeight;
+  if (follow) pinBottom();
   return el;
 }
 
@@ -504,6 +544,7 @@ function insertStamp(ts) {
 // 历史回放：时间条规则和实时发送一致（首条必插，之后换分钟才插）
 function renderHistory(messages) {
   msgsEl.innerHTML = "";
+  pinBottom();              // 回放等于重新开始，先贴底
   lastSentAt = 0;
   for (const m of messages) {
     if (m.role === "user") {
@@ -580,6 +621,7 @@ function makePainter(thinkEl, bodyEl) {
   let think = "", thinkAll = "", body = "", bodyAll = "", rafId = 0;
   const flush = () => {
     rafId = 0;
+    const follow = atBottom();   // 同样必须赶在这一帧的文字落进 DOM 之前问
     if (think) {
       thinkAll += think; think = "";
       thinkEl.textContent = stripPromptTalk(thinkAll);
@@ -589,7 +631,8 @@ function makePainter(thinkEl, bodyEl) {
       // 每帧重渲染整段：正文撑死几百字，换来流式过程里 ** 就已经是粗体
       bodyEl.innerHTML = mdToHtml(bodyAll) + '<span class="caret"></span>';
     }
-    msgsEl.scrollTop = msgsEl.scrollHeight;
+    if (follow) { pinBottom(); toBottomEl.classList.remove("on"); }
+    else markBtn();              // 不跟随的那一侧，也别让按钮漏出来
   };
   return {
     pushThink(t) { think += t; if (!rafId) rafId = requestAnimationFrame(flush); },
@@ -749,6 +792,7 @@ msgsEl.addEventListener("click", (e) => {
 async function send(text) {
   sending = true;
   $("send").disabled = true;
+  pinBottom();              // 自己发的消息：先回到底部，这一轮的输出才跟得住
 
   const now = Date.now();
   if (minuteOf(now) !== minuteOf(lastSentAt)) insertStamp(now);   // 换分钟才插
