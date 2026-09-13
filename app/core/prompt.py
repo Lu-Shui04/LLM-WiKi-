@@ -14,6 +14,7 @@ FILES = {
     "assistant": "assistant.md",  # 问到"你能做什么"时，提醒模型这是在问助手不是问用户
     "identity": "identity.md",  # 问到"你是谁"时同理——问的是助手，不是他本人
     "intent": "intent.md",      # 意图分类用的系统提示词，输出一个词
+    "wiki_qa": "wiki_qa.md",    # LLM Wiki 问答话术（和旧 RAG 那套并存，各走各的）
 }
 
 _cache: dict[str, tuple[float, str]] = {}   # name -> (mtime, 内容)
