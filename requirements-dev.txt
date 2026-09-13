@@ -1,0 +1,3 @@
+# 开发依赖：只测确定性内核（slug / frontmatter / protocol / store / lint）。
+# 编译和查询要打 API，不做自动化测试，靠 cli 手动验证。
+pytest>=8.0
