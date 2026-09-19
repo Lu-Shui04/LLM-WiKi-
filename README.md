@@ -1,115 +1,225 @@
-# 个人知识库 Agent（server-py）
+# LLM Wiki 个人知识库
 
-面试练习用的个人知识库：把简历和常见问答**编译**成结构化 Wiki，
-提问时直接读 Wiki 页面回答，并给出可追溯的引用。
+把文档丢进去，让大模型把它**编译**成一套结构化的 Markdown 知识库，再基于这套知识库回答问题。
+每个结论都能点回原文，在源文档里高亮标出来。
+
+Python + FastAPI，SQLite 存索引，前端单文件 HTML，不依赖向量库和任何外部服务。
 
 ---
 
-## 一、两套检索并存
+## 一、背景：LLM Wiki 是什么
 
-| | 旧：向量检索 RAG | 新：LLM Wiki |
+2026 年，Andrej Karpathy 在 GitHub 上发布了一份名为 **LLM Wiki** 的文档，提出把知识库的
+构建方式从「解释器模式」换成「编译器模式」。文档里没有新模型、新算法，只是一套流程：
+把原始素材喂给 LLM，让它生成结构化的 Markdown wiki，再基于这个 wiki 做检索和问答。
+
+**传统 RAG 是解释器。** 每次提问时把问题编码成向量，去库里 top-k 召回一堆切片，
+丢给模型现场解释——知识是**运行时**才被理解的，每次都要重新猜哪块相关。
+
+**LLM Wiki 是编译器。** 资料进来的那一刻就让模型读一遍全文，把它编译成结构化页面。
+提问时直接读这些页面——相关性在**编译期**就定好了，查询时不用再猜。
+
+Karpathy 给的是三层架构：
+
+| 层 | 是什么 | 谁写 | 规矩 |
+|---|---|---|---|
+| raw/ | 原始素材 | 人 | **不可变**，LLM 只读。事实基准，wiki 坏了一键重建 |
+| wiki/ | 编译产物（Markdown 页面） | LLM | 模型负责创建和更新，人只管读 |
+| schema | 配置文档（结构规范、约定、工作流） | 人 | 把模型从「通用聊天机器人」变成「有纪律的维护者」 |
+
+三层可以各自替换——Markdown 阅读器换谁都能用、模型换谁都行、schema 随领域演进。
+而第一层不可变是关键：**wiki 坏了不用修，删掉从原始素材重编**，来源的可追溯性因此保得住。
+
+它当时也挨了不少质疑，有一派直接说「这不就是多绕了几步的 RAG」。这个项目算是对那句话的
+一次实测回答。
+
+> 延伸阅读：[Karpathy 的 LLM Wiki 架构解读](https://cloud.tencent.cn/developer/article/2655117) ·
+> [Beyond RAG: LLM Wikis as Living Semantic Memory](https://zenodo.org/records/20078453)
+
+## 二、这个项目就是照那三层做的
+
+| Karpathy 的三层 | 这里的目录 | 说明 |
 |---|---|---|
-| 相关性裁决的时机 | **查询时**用余弦相似度猜 | **编译时**用 LLM 读全文定 |
-| 入口 | Web（`app/api/chat.py`） | CLI（`python -m app.wiki`） |
-| 本轮状态 | 未改动，仍可用 | 新增 |
+| raw/ | knowledge/ | 只读、不可变。一切事实的最终溯源地，编译产物坏了从这里重编 |
+| wiki/ | wiki/ | 纯派生物。删掉除 .cache/ 外的一切再重跑 ingest，等价重建 |
+| schema | SCHEMA.md | 页面契约：类型、frontmatter、命名规则、矛盾判定、增量 op 规则 |
 
-**为什么弃用向量检索**：实测数据留在 `app/api/chat.py` 的注释里——
-正样本最低分 0.509（「你平时怎么学习的」）**低于**负样本最高分 0.589
-（「帮我写一段 Python 快排」，代码题天然贴近技术语料）。
-正负样本在分数上重叠，**没有阈值能把它们分开**。
-为此已经在 `chat.py` 里堆了 9 条显式路由 + 意图分类 + 寒暄拦截来绕开检索——
-等于用规则手工重建了一个本该由知识组织方式解决的问题。
+真相只有两个来源：knowledge/ + SCHEMA.md。其余全是可再生的。
 
-LLM Wiki 换的是思路：把「查询时用向量猜哪些块相关」换成
-「摄入时用 LLM 把文档编译成结构化页面，查询时直接读页面」。
-相关性裁决交给一次有全文、有上下文的阅读理解，而不是每次查询时的余弦分数。
+## 三、传统 RAG 卡在哪（实测数据）
 
-原料只有两份文档，编译后页面数远小于上下文窗口——**"检索"这个问题直接消失了**。
+这个项目最早就是一套标准 RAG：智谱 embedding + pgvector + 余弦相似度 top-k。
+它在十几个典型问题上跑出来的分数是这样的：
 
----
-
-## 二、安装
-
-```powershell
-.venv\Scripts\python.exe -m pip install -r requirements.txt
-.venv\Scripts\python.exe -m pip install -r requirements-dev.txt   # 跑测试才需要
-```
-
-复制 `.env.example` 为 `.env` 并填 key：
-
-```powershell
-copy .env.example .env
-.venv\Scripts\python.exe -m app.config      # 自检，确认配置读到了
-```
-
-> **所有命令都必须用 `.venv\Scripts\python.exe`。**
-> PATH 上的裸 `python` 指向另一个解释器（hermes 的 venv），依赖完全不对。
-
----
-
-## 三、三个命令
-
-### `ingest` — 摄入一份原始文档
-
-```powershell
-.venv\Scripts\python.exe -m app.wiki ingest knowledge/我的简历.md
-```
-
-流程：读源文档 → LLM 分析该建哪些页 → 分三组生成 → 代码校验 → 落盘 → 渲染 index、追加 log。
-
-常用参数：
-
-| 参数 | 作用 |
+| | 分数 |
 |---|---|
-| `--dry` | 只打印增量判定与 prompt 体量估算，**不调用模型、不花钱** |
-| `--force` | 忽略增量判定，**全部页面整页重编**（不只是绕过文档级跳过） |
-| `--no-merge` | 只写摘要页，不动实体/概念/总览（假矛盾误报时的保底开关） |
-| `--allow-dangling` | 保留悬空 `[[ ]]` 引用，不降级为纯文本 |
-| `--no-reasoning` | 不把编译推理写进 `log.md` |
+| 正样本最低分（「你平时怎么学习的」） | **0.509** |
+| 负样本最高分（「帮我写一段 Python 快排」） | **0.589** |
 
-实测：`我的简历.md`（4,661 字）首次编译 **244 秒、3.6 万进 / 2.9 万出 token**；
-`常见问题回答.md`（约 3,000 字）**148 秒、2.3 万进 / 1.7 万出**。
-模型是 `deepseek-v4-pro`，比 flash 贵，编译时长按 **2.5–4 分钟**估。
+**正负样本在分数上是重叠的，没有阈值能把它们分开。** 代码题天然贴近技术语料，
+所以余弦相似度给它的分数比真问题还高。
 
-**增量跳过**：摘要页的 frontmatter 里记着 `source_sha`（源文档内容哈希）
-和 `compiler_fp`（编译规则指纹）。两者都没变时整份文档跳过，**零 token、1 秒内返回**。
+为了绕开这个洞，当时的做法是在检索前面堆规则：9 条固定栏目路由、意图分类、寒暄拦截、
+联系方式短路……**等于用规则手工重建了一个本该由知识组织方式解决的问题**。
+那套代码现在完整归档在 app/legacy/，默认一行都不执行。
 
-**规则变更时 `op: skip` 由代码升级为 `update`**：模型判「这页没有新事实」问的是
-**来源**维度，它没有「规则版本」这个概念。规则变了却听它 skip，摘要页的
-`compiler_fp` 就永远追不上当前值——于是每次 ingest 都判「规则变了」→ 重编 → 又被 skip，
-**永久空转**，页面还一直停在旧规则的产物上。所以这个判断在 `compiler.py` 里，
-不在模型手里（`--force` 走同一条路径）。
+LLM Wiki 换的是思路：相关性裁决从「查询时的余弦分数」变成「编译时的一次全文阅读理解」。
+原料只有两份文档，编译后页面数远小于上下文窗口——**「检索」这个问题本身消失了**。
 
-### `query` — 基于 Wiki 提问
+## 四、功能
 
-```powershell
-.venv\Scripts\python.exe -m app.wiki query "讲一下你的项目"
-.venv\Scripts\python.exe -m app.wiki query "…" --show-pages     # 只看会读哪几页
+### 上传文档 → LLM 编译
+
+在「资料」页传一份 Markdown，它会自动走完编译：模型读全文 → 规划该建哪些页 →
+分三组写出来 → 落到暂存区。**编译结果不会直接生效**，你看到「新建 3 页 / 更新 1 页 /
+死链降级 0 处」之后再点确认，才合并进知识库；点放弃就整目录删掉，知识库一个字节没动。
+
+支持多份文档：每传一份增量编译一次，只重写受影响的页面。
+
+### 编译产物带来源
+
+每个页面的 frontmatter 里记着它由哪些源文件编译而来；每个「细节」块下面标着
+「来自《我的简历》」这样的来源标注——这条标注后面被检索层用来精确锁定证据范围。
+
+### 流式输出
+
+SSE 推流，事件分了七类（start / stage / sources / thinking / token / citations / done）。
+推理模型的思考内容单独走一条通道，前端做成一行可选展开的胶囊，不占正文空间。
+
+### 答案溯源 + 原文高亮
+
+回答里每个结论后面标 [1][2]，点一下：右侧滑出**来源证据面板**，滚到对应卡片并展开，
+显示这段原文出自哪个文件、第几个字。再点「在原文里看这一段」，弹出源文档上下文，
+命中的那一段高亮。
+
+引用不是模型说了算：后端做**白名单校验**，模型写了 [13] 但这次只给了 12 条资料时，
+这个 [13] 直接丢掉——留着它前端点开就是 404，而它看起来像有来源。
+
+### 提示词设计
+
+问答话术放在 prompts/wiki_qa.md，改了存盘即生效（mtime 热加载，不用重启）。它规定的是
+**说话的分寸**：默认用本人第一人称答面试官，不出现「页面」「知识库」「检索」这类机制词；
+只有问这个助手本身才切回助手口吻。
+
+编译提示词在 app/wiki/prompts/ 里，它们**参与编译指纹**——改了就会触发全量重编，
+因为「同样的输入现在会产出不同的结果」。这个副作用写在 README 末尾的常见问题里。
+
+### 没依据就说不知道
+
+这是整个项目的重点。**模型只能依据当次召回的证据回答**：
+
+- 证据里有的 → 给出结论并标引用
+- 证据里没有的 → 用本人语气拒掉，并另起一行写 〔Wiki 未收录：XXX〕
+- 检索到资料但答不了这个问题 → 后端标 limited（检索到了却没被引用），前端显示「资料没用上」
+
+最后那条是最容易诱发幻觉的场景，也是最该被看见的——它在旧版本里会被当成
+「成功回答」混过去。
+
+### 知识库总览与索引
+
+每份资料编译时都会重写一页「知识库总览」，把当前收录了哪些素材、围绕哪些主题说清楚。
+提问时它**永远在上下文里**，所以「你叫什么」这类问法怎么换都答得上，不依赖词面命中。
+
+## 五、检索层怎么设计的
+
+这是花时间最多的地方。**它有两个「单位」，分清楚才看得懂为什么又便宜又准：**
+
+| | 是什么 | 多大 | 干什么用 |
+|---|---|---|---|
+| **知识单元** | 页面的一个小节 | 中位 181 字 | 检索的单位：FTS5 在它上面打分 |
+| **证据片段** | 源文档里一段连续原文 + 字符区间 | 中位 60 字 | 注入的单位：真正喂给模型的 |
+
+两者靠**绑定**连起来：页面里每个「来自《我的简历》」的块，只在《我的简历》的证据里按
+「覆盖率」找它用到的原文。覆盖率是「这条证据有多少比例被这个单元用到了」，不是相似度——
+单元常常是几条原文的并集，相似度会被长度差压扁。
+
+召回流程：
+
+```text
+FTS5(bm25: title 8 / summary 3 / body 1) 取前 8 个知识单元
+  → 不够 8 个 → 两字词 LIKE 兜底 → 再不够 → 沿页面关系扩一跳
+  → 一个都没召回到 → 让模型把问题改写成检索词，重试一次
+  → 收集这些单元绑定的证据，去重截到 12 条
+  → 只把这 12 条原文喂给模型
 ```
 
-**默认把全部页面全文喂进上下文，不做 LLM 选页。**
-选页恰恰是又一次「判断准不准」的问题，这套知识库原来就栽在这上面。
-页面数超过 `wiki_inline_max_pages`（默认 15）时才退化成代码打分预筛（字符 n-gram），
-仍然是确定性的，**不碰向量检索**。`--pages` 可手工指定兜底。
+几个踩过的点：
 
-问答话术在 `prompts/wiki_qa.md`，**改完存盘即生效**，不用重启。
+- **trigram 索引查不到两字词。** SQLite 的 FTS5 trigram 分词器只索引三连字，
+  库里写着「重试三次」，但拿「重试」去做 MATCH 返回是空的。中文里两字词占大多数，
+  所以 LIKE 兜底不是可选项。
+- **LIKE 兜底必须打分。** 一开始只写了 WHERE ... LIMIT 8，没有 ORDER BY，
+  SQLite 就按 rowid 给——等于随机取前 8 个。
+- **同义词桥的片段会被截掉。** 同义词是拼在问题后面的，而取片段时截前 8 个，
+  正好把它们切在窗口外，加了等于没加。这个不报错、不抛异常，只有评测能发现。
 
-回答末尾会把用到的引用汇总成一行。引用名对不上任何页面时会打一条 `[告警]`
-并给出最接近的真实页面名——引用是给人**跳转追溯**用的，名字错一个字，
-这一行的价值就从「追溯」变成「误导」。
+## 六、效果
 
-### `lint` — 静态检查
+同样两份资料（简历 + 面试问答）：
 
-```powershell
-.venv\Scripts\python.exe -m app.wiki lint
+| | 整页全量注入（旧） | 证据片段（现在） |
+|---|---|---|
+| 一次提问喂给模型的资料 | 11,676 字 | **平均 838 字** |
+| 输入 token | 9,575 | **2,095** |
+| 引用能追到哪 | 「来自哪一页」 | **「源文件第 3040–3092 字」** |
+
+检索评测（28 条问题，纯本地跑，不打一次模型）：
+
+```text
+  recall@1 82.1%   recall@3 92.9%   recall@8 100%   MRR 0.879
 ```
 
-六项检查：孤立页面、死链、重复实体/概念、无来源断言、未处理矛盾、frontmatter 缺字段。
-有 error 时退出码 1。
+```powershell
+.venv\Scripts\python.exe -m app.kb eval --show
+```
 
----
+> 这 28 条问题是对着自己的资料写的，属于**自测**而不是第三方基准。它真正的作用是
+> **回归**——改完检索跑一遍，就知道是变好了还是变坏了。事实上它抓出过上面第三条
+> 那个静默 bug，recall 从 67.9% 修到 82.1%。
 
-## 四、目录
+## 七、技术栈
+
+| | |
+|---|---|
+| 后端 | Python 3.11 · FastAPI · uvicorn |
+| 存储 | SQLite（用户 / 会话 / 编译记录 / 检索索引）+ 文件系统（源文档和编译产物） |
+| 检索 | SQLite FTS5 + trigram 分词 + bm25 字段加权；**没有向量库** |
+| 模型 | DeepSeek API（编译用 deepseek-v4-pro，问答用 deepseek-flash） |
+| 前端 | 单文件 HTML + 原生 JS，无构建步骤 |
+
+## 八、快速开始
+
+```powershell
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+copy .env.example .env          # 填上 DeepSeek API Key
+.venv\Scripts\python.exe -m uvicorn app.main:app --reload
+```
+
+打开 http://127.0.0.1:8000 ，第一次输入的用户名和密码就是注册。
+在「资料」页传一份 Markdown，看过编译结果后点确认，就能在聊天页提问。
+
+## 九、会话日志
+
+一轮问答会经过：检索词改写 → 全文检索 → 取证据 → 拼提示词 → 调模型 → 解引用 → 落盘。
+任何一步出问题，光看 uvicorn 的访问日志只能看到一句 POST /api/chat 200 OK。
+所以每轮问答会发一个 **trace id**，每一步记一行，都带这串 id：
+
+```text
+22:36:14 INFO  [1edbdc13] agent  chat.start    用户=5 长度=9
+22:36:14 INFO  [1edbdc13] agent  kb.search     FTS命中=8 LIKE补=0 用时=12ms
+22:36:22 INFO  [1edbdc13] agent  model.done    输入=2095 输出=687 用时=8.1s
+22:36:22 INFO  [1edbdc13] agent  chat.done     总用时=8.4s 正文=451
+```
+
+```powershell
+Select-String logs/session.log -Pattern "1edbdc13"    # 捞出这一轮的全部日志
+```
+
+trace id 用 ContextVar 传递（按协程隔离，两个用户同时提问不会串），日志写
+logs/session.log，5MB 轮转留 3 份。目录不进版本库——它带提问原文。
+
+## 十、目录
 
 ```
 knowledge/            原始素材层。只读、不可变。一切事实的最终溯源地。
@@ -124,16 +234,36 @@ wiki/                 编译产物层（纯派生物，删掉重跑即可重建�
   comparisons/        对比页（按需）
   queries/            问答归档（按需）
   .cache/             分析缓存与 LLM 原始输出（不进版本库）
-app/wiki/             代码
-  __main__.py         CLI 单入口
-  compiler.py         两阶段编译
-  query.py            选页 + 生成
-  lint.py             静态检查
-  llm.py              编译模型工厂（v4-pro）
-  prompts/            编译提示词（进指纹，不热加载）
+app/wiki/                 编译内核
+  __main__.py             CLI 单入口（ingest / query / lint）
+  compiler.py             两阶段编译（root 参数决定产物落到哪个目录）
+  query.py                选页 + 生成
+  lint.py                 静态检查
+  llm.py                  编译模型工厂（v4-pro）
+  prompts/                编译提示词（进指纹，不热加载）
   slug / paths / frontmatter / protocol / schema / store    确定性内核
-prompts/wiki_qa.md    问答话术（mtime 热加载）
-tests/                单测，全部离线
+app/kb/                   检索层（**全是派生物，不打一次模型**）
+  chunk.py                源文档 → 证据片段（带 char_start/char_end）
+  units.py                wiki 页面 → 知识单元 + 页面关系
+  bind.py                 单元 ↔ 证据的绑定（覆盖率 + 来源标注收窄范围）
+  store.py                SQLite 表 + FTS5(trigram) 索引
+  index.py                指纹与重建编排（改了源或切法才重建）
+  search.py               FTS5 召回 + 2 字 LIKE 兜底 + 关系扩一跳 + 改写
+  answer.py               证据清单 / 引用白名单 / 证据三态
+  eval.py                 检索评测 recall@k / MRR（纯本地）
+app/services/ingest.py    上传 → 编译 → 确认 / 放弃 的全过程
+app/api/
+  sources.py              资料接口（列表 / 上传 / 确认 / 放弃 / 重编 / 删除）
+  kb.py                   索引状态 / 证据原文 / 单元列表
+  chat.py                 对话分派器（不碰知识、不碰模型）
+  wiki_chat.py            wiki 链路的对话流（走 app/kb 召回）
+  wiki.py                 只读的知识库页面接口
+app/legacy/               旧向量 RAG，默认一行都不执行
+app/db/sqlite.py          用户 / 会话 / 历史 / 编译记录 / kb 表
+prompts/wiki_qa.md        问答话术（mtime 热加载）
+tests/                    单测，全部离线
+tests/kb_eval.json        检索评测问题集
+wiki/.staging/            待确认的编译产物，结案即删（已在 .gitignore）
 ```
 
 **`wiki/` 全是派生物**（`SCHEMA.md` 不在 `wiki/` 里，它在项目根目录，是**源**不是产物）。
@@ -142,7 +272,7 @@ tests/                单测，全部离线
 
 ---
 
-## 五、SCHEMA.md 的副作用（重要）
+## 十一、SCHEMA.md 的副作用（重要）
 
 `compiler_fp` = 编译提示词 + `compiler.py` + `SCHEMA.md` 三者的指纹。
 
@@ -159,27 +289,24 @@ fp 是全局的：先 ingest A、再 ingest B、改 `SCHEMA.md`、然后 ingest 
 
 ---
 
-## 六、与旧 RAG 的关系
+## 十二、旧 RAG 在哪
 
-本轮**完全没碰** `app/api/chat.py`，Web 端仍走原来的向量检索。
-CLI 走新 Wiki，两者并存、互不影响。
+整个 `app/legacy/`：`rag_chat.py`（对话流）、`vectors.py`（切块 + 余弦检索）、
+`embed.py`（智谱 embedding）、`chunk.py`（切块）、`ingest.py`（建库 CLI）、
+`postgres.py`（没接线的 pgvector 连接串）。
 
-下一轮才做的事：
+`app/api/chat.py` 现在只是个分派器，按 `CHAT_BACKEND` 把请求交给 wiki 或 legacy。
+默认 wiki；两条链路发的是同一套 SSE 事件，所以前端不必知道走的是哪条。
+向量库也只在 legacy 模式下才初始化——wiki 模式启动时一次都不碰。
 
-- 把 `chat.py` 的检索决策搬进 `app/legacy/rag_chat.py`
-- 加 `chat_backend` 分派开关（配置项已存在，只是还没接线）
-- 废弃旧向量层
+要彻底退役：删掉 `app/legacy/`，顺手删掉 `config.py` 里的 `zhipu_*` / `pg_*` /
+`embedding_*` 和 `chat_backend` 开关。
 
-已经探明的两个 Web 兼容性硬约束，留给下一轮：
 
-- `web/index.html:466` 是 `chip.textContent = \`${it.doc}【${it.n}】\``，
-  wiki 模式下 `doc` 要填短名（`concepts/意图路由`）而不是全路径，否则 chip 会被撑长
-- `_StripMarks` 引用编号清洗、`reasoning_content` → `thinking` 转发、`session.lock`
-  这三样绝不能在切换时误砍
 
 ---
 
-## 七、测试
+## 十三、测试
 
 ```powershell
 .venv\Scripts\python.exe -m pytest -v
@@ -202,7 +329,7 @@ compiler 里不碰模型的那几个纯函数）。**全部离线**，不联网�
 
 ---
 
-## 八、常见问题
+## 十四、常见问题
 
 **Q：编译出来页面只有两三个，而且摘要页特别长？**
 说明分析阶段把建页门槛设太高了。看 `wiki/.cache/last-raw/00__plan.json`

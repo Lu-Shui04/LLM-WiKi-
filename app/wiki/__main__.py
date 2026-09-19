@@ -67,6 +67,11 @@ def _report_ingest(res) -> None:
 
 
 def main(argv=None) -> int:
+    from app.core import log
+
+    # CLI 也走同一套会话日志：一条 ingest 命令会打印四步进度、写一行 trace，
+    # 跑完之后 logs/session.log 里能按 trace 看到那一次编译的每一步耗时与用量。
+    log.setup()
     args = build_parser().parse_args(argv)
 
     if args.cmd == "lint":
@@ -86,15 +91,23 @@ def main(argv=None) -> int:
     from app.config import ConfigError
     from app.wiki import compiler, protocol, store
 
+    # 这一行在 trace 之外：命令本身还没开始跑，先把它记下来，
+    # 这样日志里能看出「有人发起过」和「跑成什么样」是两件事
+    log.step("cli.start", 命令="ingest", 源=args.source, 强制=args.force, 预演=args.dry)
     try:
-        res = asyncio.run(compiler.ingest(
-            args.source,
-            force=args.force,
-            dry=args.dry,
-            no_merge=args.no_merge,
-            allow_dangling=args.allow_dangling,
-            show_reasoning=not args.no_reasoning,
-        ))
+        with log.trace_scope() as trace:
+            timer = log.Timer()
+            res = asyncio.run(compiler.ingest(
+                args.source,
+                force=args.force,
+                dry=args.dry,
+                no_merge=args.no_merge,
+                allow_dangling=args.allow_dangling,
+                show_reasoning=not args.no_reasoning,
+            ))
+            log.step("cli.ingest", 源=args.source, 跳过=res.skipped,
+                     新建=len(res.created), 更新=len(res.updated),
+                     用时=timer.ms)
     except compiler.CompileError as exc:
         print(f"编译失败：{exc}", file=sys.stderr)
         return 1

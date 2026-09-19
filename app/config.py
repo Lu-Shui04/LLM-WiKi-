@@ -58,16 +58,34 @@ class Settings(BaseSettings):
     # 所以它坏了不用修，删掉重跑即可。
     wiki_dir: Path = Path(__file__).resolve().parent.parent / "wiki"
     schema_file: Path = Path(__file__).resolve().parent.parent / "SCHEMA.md"
-    # 页面数不超过这个值时，query 把全部页面全文注入上下文。
-    # 超过才切成「代码打分预筛」，因为那时全量注入的 token 成本开始不划算。
+    # 页面数不超过这个值时，query 把全部页面全文注入上下文（小库全给更省事也更准，
+    # 而且这一档成本天然有界）。超过才切成「BM25 选页 + 目录」，见 query.select。
     wiki_inline_max_pages: int = 15
+    # 超过内联上限后走选页：BM25 取前几页全文。知识库总览页不受这个数限制，永远带上。
+    wiki_top_pages: int = 8
+    # 选页模式下附一份目录（标题 + 一句话摘要），最多列几行。
+    # 目录是导航，不是「把整库贴上去」的借口，所以它也有上界。
+    wiki_catalog_max: int = 60
     # "wiki" 走 LLM Wiki；"legacy" 回退旧的向量检索。
     # 注意：本阶段 chat.py 还没接这个开关，它只是先声明出来。
     chat_backend: str = "wiki"
 
+    # ─── 问答主语 ───────────────────────────────────────
+    # 检索词改写时要用。模型很容易把「小米」理解成小米公司，于是把「他是谁」
+    # 改写成「雷军 小米公司 创始人」——而知识库里一个字都没有。这不是提示词
+    # 写得不好，是主体名和知名实体同名，只能靠显式声明压住。
+    subject_name: str = "小米"
+    subject_full_name: str = "米尔艾合麦提·伊斯延"
+
     # ─── 提示词 ─────────────────────────────────────────
     # 必须和 knowledge_dir 分开：knowledge/ 会被 ingest 切块嵌进向量库，提示词不能进去
     prompts_dir: Path = Path(__file__).resolve().parent.parent / "prompts"
+
+    # ─── 会话日志 ───────────────────────────────────────
+    # 一轮问答跨好几个模块，日志按 trace id 串起来才能还原全链路。
+    # 目录不进版本库（logs/ 在 .gitignore 里）：它是本机运行产物。
+    log_dir: Path = Path(__file__).resolve().parent.parent / "logs"
+    log_level: str = "INFO"
 
     # ─── PostgreSQL + pgvector ──────────────────────────
     pg_host: str = "localhost"
@@ -106,7 +124,9 @@ class Settings(BaseSettings):
         print(f"PG        {self.pg_dsn_safe}")
         print(f"编译      model={self.ingest_model}")
         print(f"Wiki      {self.wiki_dir}")
-        print(f"          内联上限 {self.wiki_inline_max_pages} 页  后端 {self.chat_backend}")
+        print(f"          内联上限 {self.wiki_inline_max_pages} 页  超了取前 "
+              f"{self.wiki_top_pages} 页 + 目录（≤{self.wiki_catalog_max} 行）"
+              f"  后端 {self.chat_backend}")
 
 
 settings = Settings()
