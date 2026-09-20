@@ -30,7 +30,8 @@ def scrub(text: str) -> tuple[str, dict]:
         meta[key] = f"{meta[key]} / {m.group()}" if key in meta else m.group()
         return "[见元数据]"
 
-    # 先邮箱再电话：13699965948@163.com 里的号段本身也匹配电话正则，顺序反了会把邮箱拆两半
+    # 先邮箱再电话：邮箱里常带手机号（13800000000@qq.com），那串号段本身也匹配电话正则，
+    # 顺序反了就会把邮箱拆成两半
     text = EMAIL.sub(lambda m: take(m, "email"), text)
     text = PHONE.sub(lambda m: take(m, "phone"), text)
     return text, meta

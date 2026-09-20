@@ -1,6 +1,6 @@
 """PostgreSQL 连接。值统一来自 app.config.settings，这里不再自己读环境变量。
 
-用法：from app.db.postgres import PG_CONNECTION_STRING
+用法：from app.legacy.postgres import PG_CONNECTION_STRING
 """
 from app.config import settings
 

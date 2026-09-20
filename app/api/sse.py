@@ -64,6 +64,32 @@ def scour(text: str) -> str:
     return StripMarks.NUM.sub("", text)
 
 
+def usage_event(meta) -> dict | None:
+    """langchain 的 usage_metadata → 一条 usage 事件。
+
+    字段是实测出来的（deepseek-flash + stream_usage=True）：
+        {"input_tokens": 39, "output_tokens": 56, "total_tokens": 95,
+         "input_token_details": {"cache_read": 0},
+         "output_token_details": {"reasoning": 53}}
+
+    `cache_read` 是**缓存命中的输入 token**——它是这堆数里最值钱的一个：
+    命中价和未命中价差 50 倍，看不见它就不知道钱花在哪。
+    `reasoning` 是思考占掉的那部分输出 token，它也是按输出价计费的。
+    """
+    if not meta:
+        return None
+    detail_in = meta.get("input_token_details") or {}
+    detail_out = meta.get("output_token_details") or {}
+    return {
+        "type": "usage",
+        "input": int(meta.get("input_tokens") or 0),
+        "output": int(meta.get("output_tokens") or 0),
+        "total": int(meta.get("total_tokens") or 0),
+        "cache_read": int(detail_in.get("cache_read") or 0),
+        "reasoning": int(detail_out.get("reasoning") or 0),
+    }
+
+
 def stage(key: str, text: str) -> dict:
     """阶段事件。前端拿它显示「识别意图…」这类进度，key 用于去重/排序"""
     return {"type": "stage", "key": key, "text": text}

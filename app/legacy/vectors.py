@@ -16,7 +16,7 @@ from app.db.sqlite import connect
 
 PRIORITY_BONUS = 0.03   # 标了 priority 的块加这一点分，只用来打破平局，不改变量级
 
-# 改了 SCHEMA 或 app/core/chunk.py 的切块逻辑就 +1。切块是从 knowledge/ 重算出来的派生物，
+# 改了 SCHEMA 或 app/legacy/chunk.py 的切块逻辑就 +1。切块是从 knowledge/ 重算出来的派生物，
 # 与其写迁移，不如整个重建——省得再踩一次「CREATE TABLE IF NOT EXISTS 不改已存在的表」。
 # 也顺手解决了「切块代码变了但 md 没变，ingest 按 sha 判定跳过」的问题。
 SCHEMA_VERSION = 2

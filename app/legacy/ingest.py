@@ -1,8 +1,8 @@
 """建库：扫 knowledge/ 下的 md → 按结构切块 → 算 embedding → 写进 SQLite
 
-    python -m app.core.ingest           增量，文件内容没变就跳过（不重复花 embedding 的钱）
-    python -m app.core.ingest --force   全部重切重算
-    python -m app.core.ingest --dry     只切不算，看看切出来什么模样
+    python -m app.legacy.ingest           增量，文件内容没变就跳过（不重复花 embedding 的钱）
+    python -m app.legacy.ingest --force   全部重切重算
+    python -m app.legacy.ingest --dry     只切不算，看看切出来什么模样
 
 文件按路径整篇覆盖，改完文档重跑就行，不用清库。
 """
@@ -12,9 +12,8 @@ import inspect
 import sys
 
 from app.config import settings
-from app.core import chunk
-from app.core.embed import embed
-from app.db import vectors
+from app.legacy import chunk, vectors
+from app.legacy.embed import embed
 
 SKIP = {"README.md"}   # 目录说明不算知识
 
